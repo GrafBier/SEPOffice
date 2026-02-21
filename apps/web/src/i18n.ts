@@ -1,0 +1,128 @@
+import i18n from 'i18next';
+import { initReactI18next } from 'react-i18next';
+import LanguageDetector from 'i18next-browser-languagedetector';
+
+const resources = {
+  en: {
+    translation: {
+      "dashboard": "Dashboard",
+      "write": "SEPWrite",
+      "grid": "SEPGrid",
+      "show": "SEPShow",
+      "settings": "Settings",
+      "help": "Help",
+      "new": "New",
+      "open": "Open",
+      "save": "Save",
+      "import": "Import",
+      "export": "Export",
+      "print": "Print",
+      "undo": "Undo",
+      "redo": "Redo",
+      "ai_tool": "AI Assistant",
+      "theme_light": "Light Mode",
+      "theme_dark": "Dark Mode",
+      "new_slide": "New Slide",
+      "present": "Present",
+      "speaker_notes": "Speaker Notes",
+      "duplicate": "Duplicate",
+      "delete": "Delete",
+      "move_up": "Move Up",
+      "move_down": "Move Down",
+      "insert_image": "Insert Image",
+      "formatting": "Formatting",
+      "alignment": "Alignment",
+      "color": "Color",
+      "ai_generate": "AI Generate",
+      "welcome": "Welcome to SEPOffice",
+      "choose_app": "Choose an application to start working.",
+      "recent_docs": "Recent Documents",
+      "write_desc": "Professional text processing with AI support.",
+      "grid_desc": "Powerful spreadsheets and data analysis.",
+      "show_desc": "Impressive presentations and slide design.",
+      "active": "Active",
+      "new_badge": "New"
+    }
+  },
+  de: {
+    translation: {
+      "dashboard": "Dashboard",
+      "write": "SEPWrite",
+      "grid": "SEPGrid",
+      "show": "SEPShow",
+      "settings": "Einstellungen",
+      "help": "Hilfe",
+      "new": "Neu",
+      "open": "Öffnen",
+      "save": "Speichern",
+      "import": "Importieren",
+      "export": "Exportieren",
+      "print": "Drucken",
+      "undo": "Rückgängig",
+      "redo": "Wiederholen",
+      "ai_tool": "KI-Assistent",
+      "theme_light": "Helles Design",
+      "theme_dark": "Dunkles Design",
+      "new_slide": "Neue Folie",
+      "present": "Präsentieren",
+      "speaker_notes": "Sprechernotizen",
+      "duplicate": "Duplizieren",
+      "delete": "Löschen",
+      "move_up": "Nach oben",
+      "move_down": "Nach unten",
+      "insert_image": "Bild einfügen",
+      "formatting": "Formatierung",
+      "alignment": "Ausrichtung",
+      "color": "Farbe",
+      "ai_generate": "KI Erstellen",
+      "welcome": "Willkommen bei SEPOffice",
+      "choose_app": "Wählen Sie eine Applikation, um mit der Arbeit zu beginnen.",
+      "recent_docs": "Zuletzt verwendete Dokumente",
+      "write_desc": "Professionelle Textverarbeitung mit KI-Unterstützung.",
+      "grid_desc": "Leistungsstarke Tabellenkalkulation und Datenanalyse.",
+      "show_desc": "Eindrucksvolle Präsentationen und Folien-Design.",
+      "active": "Aktiv",
+      "new_badge": "Neu"
+    }
+  },
+  fr: { translation: { "dashboard": "Tableau de bord", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Paramètres", "help": "Aide", "new": "Nouveau", "open": "Ouvrir", "save": "Enregistrer", "undo": "Annuler", "redo": "Rétablir" } },
+  zh: { translation: { "dashboard": "仪表板", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "设置", "help": "帮助", "new": "新建", "open": "打开", "save": "保存", "undo": "撤销", "redo": "重做" } },
+  es: { translation: { "dashboard": "Tablero", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Ajustes", "help": "Ayuda", "new": "Nuevo", "open": "Abrir", "save": "Guardar", "undo": "Deshacer", "redo": "Rehacer" } },
+  it: { translation: { "dashboard": "Dashboard", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Impostazioni", "help": "Aiuto", "new": "Nuovo", "open": "Apri", "save": "Salva", "undo": "Annulla", "redo": "Ripristina" } },
+  ru: { translation: { "dashboard": "Панель", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Настройки", "help": "Помощь", "new": "Новый", "open": "Открыть", "save": "Сохранить", "undo": "Отменить", "redo": "Повторить" } },
+  ja: { translation: { "dashboard": "ダッシュボード", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "設定", "help": "ヘルプ", "new": "新規", "open": "開く", "save": "保存", "undo": "元に戻す", "redo": "やり直し" } },
+  ko: { translation: { "dashboard": "대시보드", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "설정", "help": "도움말", "new": "새로 만들기", "open": "열기", "save": "저장", "undo": "실행 취소", "redo": "다시 실행" } },
+  vi: { translation: { "dashboard": "Bảng điều khiển", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Cài đặt", "help": "Trợ giúp", "new": "Mới", "open": "Mở", "save": "Lưu", "undo": "Hoàn tác", "redo": "Làm lại" } },
+  th: { translation: { "dashboard": "แดชบอร์ด", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "การตั้งค่า", "help": "ความช่วยเหลือ", "new": "ใหม่", "open": "เปิด", "save": "บันทึก", "undo": "เลิกทำ", "redo": "ทำซ้ำ" } },
+  id: { translation: { "dashboard": "Dasbor", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Pengaturan", "help": "Bantuan", "new": "Baru", "open": "Buka", "save": "Simpan", "undo": "Urungkan", "redo": "Ulangi" } },
+  pt: { translation: { "dashboard": "Painel", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Configurações", "help": "Ajuda", "new": "Novo", "open": "Abrir", "save": "Salvar", "undo": "Desfazer", "redo": "Refazer" } },
+  ar: { translation: { "dashboard": "لوحة القيادة", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "الإعدادات", "help": "مساعدة", "new": "جديد", "open": "فتح", "save": "حفظ", "undo": "تراجع", "redo": "إعادة" } },
+  tr: { translation: { "dashboard": "Panel", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Ayarlar", "help": "Yardım", "new": "Yeni", "open": "Aç", "save": "Kaydet", "undo": "Geri Al", "redo": "Yinele" } },
+  el: { translation: { "dashboard": "Πίνακας", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Ρυθμίσεις", "help": "Βοήθεια", "new": "Νέο", "open": "Άνοιγμα", "save": "Αποθήκευση", "undo": "Αναίρεση", "redo": "Επανάληψη" } },
+  nl: { translation: { "dashboard": "Dashboard", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Instellingen", "help": "Help", "new": "Nieuw", "open": "Open", "save": "Opslaan", "undo": "Ongedaan maken", "redo": "Opnieuw" } },
+  hi: { translation: { "dashboard": "डैशबोर्ड", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "सेटिंग्स", "help": "सहायता", "new": "नया", "open": "खोलें", "save": "सहेजें", "undo": "पूर्ववत करें", "redo": "फिर से करें" } },
+  bn: { translation: { "dashboard": "ড্যাশবোর্ড", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "সেটিংস", "help": "সহায়তা", "new": "নতুন", "open": "খুলুন", "save": "সংরক্ষণ", "undo": "পূর্বাবস্থায় ফিরুন", "redo": "পুনরায় করুন" } },
+  ms: { translation: { "dashboard": "Papan Pemuka", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Tetapan", "help": "Bantuan", "new": "Baru", "open": "Buka", "save": "Simpan", "undo": "Buat asal", "redo": "Buat semula" } },
+  fa: { translation: { "dashboard": "داشبورد", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "تنظیمات", "help": "راهنما", "new": "جدید", "open": "باز کردن", "save": "ذخیره", "undo": "لغو", "redo": "انجام دوباره" } },
+  he: { translation: { "dashboard": "לוח בקרה", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "הגדרות", "help": "עזרה", "new": "חדש", "open": "פתח", "save": "שמור", "undo": "בטל", "redo": "בצע שוב" } },
+  pl: { translation: { "dashboard": "Panel", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Ustawienia", "help": "Pomoc", "new": "Nowy", "open": "Otwórz", "save": "Zapisz", "undo": "Cofnij", "redo": "Ponów" } },
+  cs: { translation: { "dashboard": "Nástěnka", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Nastavení", "help": "Nápověda", "new": "Nový", "open": "Otevřít", "save": "Uložit", "undo": "Zpět", "redo": "Znovu" } },
+  sv: { translation: { "dashboard": "Instrumentpanel", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Inställningar", "help": "Hjälp", "new": "Ny", "open": "Öppna", "save": "Spara", "undo": "Ångra", "redo": "Gör om" } },
+  no: { translation: { "dashboard": "Dashbord", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Innstillinger", "help": "Hjelp", "new": "Ny", "open": "Åpne", "save": "Lagre", "undo": "Angre", "redo": "Gjør om" } },
+  da: { translation: { "dashboard": "Oversigt", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Indstillinger", "help": "Hjælp", "new": "Ny", "open": "Åbn", "save": "Gem", "undo": "Fortryd", "redo": "Annuller fortryd" } },
+  fi: { translation: { "dashboard": "Hallintapaneeli", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Asetukset", "help": "Ohje", "new": "Uusi", "open": "Avaa", "save": "Tallenna", "undo": "Kumoa", "redo": "Tee uudelleen" } },
+  uk: { translation: { "dashboard": "Панель", "write": "SEPWrite", "grid": "SEPGrid", "show": "SEPShow", "settings": "Налаштування", "help": "Допомога", "new": "Новий", "open": "Відкрити", "save": "Зберегти", "undo": "Скасувати", "redo": "Повторити" } }
+};
+
+i18n
+  .use(LanguageDetector)
+  .use(initReactI18next)
+  .init({
+    resources,
+    fallbackLng: 'en',
+    interpolation: {
+      escapeValue: false,
+    },
+  });
+
+export default i18n;

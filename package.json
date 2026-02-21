@@ -1,0 +1,46 @@
+{
+  "name": "sepoffice",
+  "version": "1.0.0",
+  "description": "SEPOffice - AI powered Office Suite",
+  "main": "electron-main.js",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "web:dev": "npm run dev -w web",
+    "api:dev": "npm run dev -w api",
+    "desktop:start": "electron .",
+    "desktop:build": "npm run build --workspaces && electron-builder"
+  },
+  "build": {
+    "appId": "com.sep.office",
+    "productName": "SEPOffice",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron-main.js",
+      "preload.js",
+      "apps/web/dist/**/*",
+      "apps/api/dist/**/*"
+    ],
+    "win": {
+      "target": "portable"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  },
+  "devDependencies": {
+    "electron": "^40.6.0",
+    "electron-builder": "^22.14.13"
+  },
+  "dependencies": {
+    "eslint": "^9.39.1",
+    "typescript-eslint": "8.36.0"
+  }
+}
