@@ -1,11 +1,22 @@
-name: Build Win Portable EXE
+name: Build All Platforms (Win, Linux, macOS)
 
 on:
-  workflow_dispatch: # Ermöglicht das manuelle Auslösen in GitHub Actions
+  workflow_dispatch:
 
 jobs:
   build:
-    runs-on: windows-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        include:
+          - os: windows-latest
+            platform: win
+          - os: ubuntu-latest
+            platform: linux
+          - os: macos-latest
+            platform: mac
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -22,13 +33,18 @@ jobs:
       - name: Build applications
         run: npm run build --workspaces
 
-      - name: Build Electron EXE
-        run: npx electron-builder --win portable
+      - name: Build Electron App
+        run: npx electron-builder --${{ matrix.platform }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: SEPOffice-Portable-EXE
-          path: release/*.exe
+          name: SEPOffice-${{ matrix.platform }}
+          path: |
+            release/*.exe
+            release/*.dmg
+            release/*.AppImage
+            release/*.zip
+
