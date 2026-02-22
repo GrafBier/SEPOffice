@@ -2,6 +2,7 @@
   "name": "sepoffice",
   "version": "1.0.0",
   "description": "SEPOffice - AI powered Office Suite",
+  "author": "Simon Erich Plath",
   "main": "electron-main.js",
   "private": true,
   "workspaces": [
@@ -37,7 +38,7 @@
   },
   "devDependencies": {
     "electron": "^40.6.0",
-    "electron-builder": "^22.14.13"
+    "electron-builder": "^26.8.1"
   },
   "dependencies": {
     "eslint": "^9.39.1",

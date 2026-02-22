@@ -30,6 +30,11 @@ jobs:
       - name: Install dependencies
         run: npm install
 
+      # Workaround for macOS python issue with older dmg creation scripts
+      - name: macOS Python Symlink (Workaround)
+        if: matrix.os == 'macos-latest'
+        run: sudo ln -sf $(which python3) /usr/local/bin/python
+
       - name: Build applications
         run: npm run build --workspaces
 
