@@ -1,6 +1,6 @@
 {
   "name": "sepoffice",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "SEPOffice - AI powered Office Suite",
   "author": "Simon Erich Plath",
   "main": "electron-main.js",
@@ -11,8 +11,11 @@
   "scripts": {
     "web:dev": "npm run dev -w web",
     "api:dev": "npm run dev -w api",
+    "ai:dev": "cd services/ai && ../../.venv/Scripts/python -m uvicorn main:app --port 8080",
+    "build:ai": "cd services/ai && ..\\..\\.venv\\Scripts\\pyinstaller ai_service.spec --clean --noconfirm",
+    "dev:all": "concurrently \"npm run web:dev\" \"npm run api:dev\" \"npm run ai:dev\"",
     "desktop:start": "electron .",
-    "desktop:build": "npm run build --workspaces && electron-builder"
+    "desktop:build": "npm run build:ai && npm run build --workspaces && electron-builder"
   },
   "build": {
     "appId": "com.sep.office",
@@ -23,11 +26,36 @@
     "files": [
       "electron-main.js",
       "preload.js",
+      "icon.png",
       "apps/web/dist/**/*",
-      "apps/api/dist/**/*"
+      "apps/api/dist/**/*",
+      "docs/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "services/ai/dist/ai_service.exe",
+        "to": "ai_service.exe"
+      },
+      {
+        "from": "services/ai/model",
+        "to": "ai/model"
+      }
     ],
     "win": {
-      "target": "portable"
+      "target": "nsis",
+      "icon": "icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerIcon": "icon.ico",
+      "uninstallerIcon": "icon.ico",
+      "installerHeaderIcon": "icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "SEPOffice",
+      "language": "1031",
+      "perMachine": false
     },
     "mac": {
       "target": "dmg"
@@ -37,6 +65,8 @@
     }
   },
   "devDependencies": {
+    "@esbuild-plugins/node-globals-polyfill": "^0.2.3",
+    "concurrently": "^9.2.1",
     "electron": "^40.6.0",
     "electron-builder": "^26.8.1"
   },

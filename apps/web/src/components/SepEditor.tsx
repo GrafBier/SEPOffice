@@ -19,11 +19,7 @@ import {
     Heading1,
     Heading2,
     Strikethrough,
-    Quote,
-    AlignLeft,
-    AlignCenter,
-    AlignRight,
-    AlignJustify,
+    Quote, AlignLeft, AlignCenter, AlignRight, AlignJustify,
     Printer,
     Underline as UnderlineIcon,
     Highlighter,
@@ -487,21 +483,25 @@ export default function SepEditor({ docId }: { docId?: string | null }) {
     useEffect(() => {
         if (!editor) return;
 
-        if (currentDocId) {
-            const savedContent = persistenceService.getDocContent(currentDocId);
-            if (savedContent) {
-                editor.commands.setContent(savedContent);
-                const meta = persistenceService.getRecentDocs().find(d => d.id === currentDocId);
-                if (meta) setDocName(meta.name);
+        const loadContent = async () => {
+            if (currentDocId) {
+                const savedContent = await persistenceService.getDocContent(currentDocId);
+                if (savedContent) {
+                    editor.commands.setContent(savedContent);
+                    const docs = await persistenceService.getRecentDocs();
+                    const meta = docs.find(d => d.id === currentDocId);
+                    if (meta) setDocName(meta.name);
+                }
+            } else {
+                // New Document
+                const newId = `write-${Date.now()}`;
+                setCurrentDocId(newId);
+                editor.commands.setContent(`<h1>Willkommen bei SEPWrite</h1><p>Beginnen Sie hier zu schreiben...</p>`);
+                await persistenceService.saveDoc(newId, docName, 'write', editor.getHTML());
             }
-        } else {
-            // New Document
-            const newId = `write-${Date.now()}`;
-            setCurrentDocId(newId);
-            editor.commands.setContent(`<h1>Willkommen bei SEPWrite</h1><p>Beginnen Sie hier zu schreiben...</p>`);
-            persistenceService.saveDoc(newId, docName, 'write', editor.getHTML());
-        }
-    }, [editor, currentDocId, docName]);
+        };
+        loadContent();
+    }, [editor, currentDocId]);
 
     // Auto-save logic
     useEffect(() => {
@@ -510,8 +510,8 @@ export default function SepEditor({ docId }: { docId?: string | null }) {
         const updateHandler = () => {
             if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
             setSaveStatus("Saving...");
-            saveTimeoutRef.current = window.setTimeout(() => {
-                const result = persistenceService.saveDoc(currentDocId, docName, 'write', editor.getHTML());
+            saveTimeoutRef.current = window.setTimeout(async () => {
+                const result = await persistenceService.saveDoc(currentDocId, docName, 'write', editor.getHTML());
                 setSaveStatus(result.warning || "All changes saved");
             }, 1000) as unknown as number;
         };

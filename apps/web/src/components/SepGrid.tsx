@@ -833,33 +833,38 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
 
   // Loading Logic
   useEffect(() => {
-    if (!currentDocId) {
-      const newId = `grid-${Date.now()}`;
-      setCurrentDocId(newId);
-      const { docName: snapshotDocName, sheets: snapshotSheets } = persistenceSnapshotRef.current;
-      persistenceService.saveDoc(newId, snapshotDocName, 'grid', JSON.stringify(snapshotSheets));
-      return;
-    }
-
-    // Verify this is actually a grid document before parsing
-    const meta = persistenceService.getRecentDocs().find(d => d.id === currentDocId);
-    if (meta && meta.type !== 'grid') {
-      console.warn("Document is not a grid type, skipping load:", currentDocId);
-      const newId = `grid-${Date.now()}`;
-      setCurrentDocId(newId);
-      return;
-    }
-
-    const savedContent = persistenceService.getDocContent(currentDocId);
-    if (savedContent) {
-      try {
-        const parsedSheets = JSON.parse(savedContent);
-        setSheets(parsedSheets);
-        if (meta) setDocName(meta.name);
-      } catch (e) {
-        console.error("Failed to parse saved grid content", e);
+    const loadContent = async () => {
+      if (!currentDocId) {
+        const newId = `grid-${Date.now()}`;
+        setCurrentDocId(newId);
+        const { docName: snapshotDocName, sheets: snapshotSheets } = persistenceSnapshotRef.current;
+        await persistenceService.saveDoc(newId, snapshotDocName, 'grid', JSON.stringify(snapshotSheets));
+        return;
       }
-    }
+
+      // Verify this is actually a grid document before parsing
+      const docs = await persistenceService.getRecentDocs();
+      const meta = docs.find(d => d.id === currentDocId);
+      if (meta && meta.type !== 'grid') {
+        console.warn("Document is not a grid type, skipping load:", currentDocId);
+        const newId = `grid-${Date.now()}`;
+        setCurrentDocId(newId);
+        return;
+      }
+
+      const savedContent = await persistenceService.getDocContent(currentDocId);
+      if (savedContent) {
+        try {
+          const parsedSheets = JSON.parse(savedContent);
+          setSheets(parsedSheets);
+          if (meta) setDocName(meta.name);
+        } catch (e) {
+          console.error("Failed to parse saved grid content", e);
+        }
+      }
+    };
+
+    loadContent();
   }, [currentDocId]);
 
   // Auto-save logic
@@ -868,8 +873,8 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
 
     if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
     setSaveStatus("Saving...");
-    saveTimeoutRef.current = window.setTimeout(() => {
-      const result = persistenceService.saveDoc(currentDocId, docName, 'grid', JSON.stringify(sheets));
+    saveTimeoutRef.current = window.setTimeout(async () => {
+      const result = await persistenceService.saveDoc(currentDocId, docName, 'grid', JSON.stringify(sheets));
       setSaveStatus(result.warning || "All changes saved");
     }, 1000) as unknown as number;
   }, [sheets, currentDocId, docName]);
@@ -1244,105 +1249,15 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
         setSaveStatus(`Angewendet (Raw): ${aiPromptContext}`);
       } else if (response.type === "tools" && response.calls) {
         // Tool calling Mode
-        const newData = [...data];
-        const newStyles = { ...cellStyles };
-        let anyChanges = false;
-
-        const parseCol = (str: string) => {
-          let s = 0;
-          for (let i = 0; i < str.length; i++) {
-            s = s * 26 + str.charCodeAt(i) - 64;
-          }
-          return s - 1;
-        };
-
-        const parseRange = (rangeStr: string) => {
-          const parts = rangeStr.split(":");
-          if (parts.length === 1) {
-            const match = parts[0].match(/([A-Z]+)(\d+)/);
-            if (match) {
-              const c = parseCol(match[1]);
-              const r = parseInt(match[2], 10) - 1;
-              return { minR: r, maxR: r, minC: c, maxC: c };
-            }
-          } else if (parts.length === 2) {
-            // Full Column (e.g., A:A)
-            if (/^[A-Z]+:[A-Z]+$/.test(rangeStr)) {
-              const c1 = parseCol(parts[0]);
-              const c2 = parseCol(parts[1]);
-              return { minR: 0, maxR: rows - 1, minC: Math.min(c1, c2), maxC: Math.max(c1, c2) };
-            }
-            // Normal Range e.g. A1:B2
-            const m1 = parts[0].match(/([A-Z]+)(\d+)/);
-            const m2 = parts[1].match(/([A-Z]+)(\d+)/);
-            if (m1 && m2) {
-              const c1 = parseCol(m1[1]);
-              const r1 = parseInt(m1[2], 10) - 1;
-              const c2 = parseCol(m2[1]);
-              const r2 = parseInt(m2[2], 10) - 1;
-              return {
-                minR: Math.min(r1, r2), maxR: Math.max(r1, r2),
-                minC: Math.min(c1, c2), maxC: Math.max(c1, c2)
-              };
-            }
-          }
-          return null;
-        };
-
         for (const call of response.calls) {
           if (!call.function?.arguments) continue;
           let args;
           try {
             args = JSON.parse(call.function.arguments);
           } catch { continue; }
-
-          if (call.function.name === "format_cells" && args.range && args.style) {
-            const parsed = parseRange(args.range);
-            if (parsed) {
-              for (let r = Math.max(0, parsed.minR); r <= Math.min(rows - 1, parsed.maxR); r++) {
-                for (let c = Math.max(0, parsed.minC); c <= Math.min(cols - 1, parsed.maxC); c++) {
-                  const key = `${r}-${c}`;
-                  newStyles[key] = { ...(newStyles[key] || {}), ...args.style };
-                }
-              }
-              anyChanges = true;
-            }
-          } else if (call.function.name === "update_values" && args.startCell && args.values) {
-            const match = args.startCell.match(/([A-Z]+)(\d+)/);
-            if (match) {
-              const startC = parseCol(match[1]);
-              const startR = parseInt(match[2], 10) - 1;
-
-              for (let r = 0; r < args.values.length; r++) {
-                const tr = startR + r;
-                if (tr >= rows) continue;
-                newData[tr] = [...(newData[tr] || [])];
-                for (let c = 0; c < args.values[r].length; c++) {
-                  const tc = startC + c;
-                  if (tc >= cols) continue;
-                  newData[tr][tc] = String(args.values[r][c]);
-                }
-              }
-              anyChanges = true;
-            }
-          } else if (call.function.name === "clear_range" && args.range) {
-            const parsed = parseRange(args.range);
-            if (parsed) {
-              for (let r = Math.max(0, parsed.minR); r <= Math.min(rows - 1, parsed.maxR); r++) {
-                newData[r] = [...(newData[r] || [])];
-                for (let c = Math.max(0, parsed.minC); c <= Math.min(cols - 1, parsed.maxC); c++) {
-                  newData[r][c] = "";
-                }
-              }
-              anyChanges = true;
-            }
-          }
-        } // end of for loop over tool calls
-
-        if (anyChanges) {
-          updateCurrentSheet({ data: newData, cellStyles: newStyles });
-          setSaveStatus(`KI Aktion ausgeführt: ${aiPromptContext}`);
+          handleEliotAction(call.function.name, args);
         }
+        setSaveStatus(`KI Aktion ausgeführt: ${aiPromptContext}`);
       }
 
     } catch (err) {
@@ -1352,6 +1267,114 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
       setIsPromptingAI(false);
       setAiPromptOpen(false);
     }
+  };
+
+  function handleEliotAction(name: string, args: any) {
+    const parseCell = (ref: string) => {
+      if (!ref) return null;
+      const match = ref.match(/([A-Z]+)(\d+)/);
+      if (!match) return null;
+      const col = match[1].split('').reduce((acc, char) => acc * 26 + char.charCodeAt(0) - 64, 0) - 1;
+      const row = parseInt(match[2]) - 1;
+      return { r: row, c: col };
+    };
+
+    const parseRange = (range: string) => {
+      if (!range) return null;
+      const parts = range.split(":");
+      if (parts.length !== 2) return null;
+      const start = parseCell(parts[0]);
+      const end = parseCell(parts[1]);
+      if (!start || !end) return null;
+      return { start, end };
+    };
+
+    if (name === "add_sheet") {
+      const news: Sheet = {
+        id: `sheet-${Date.now()}`,
+        name: args.name || `Tabelle ${sheets.length + 1}`,
+        rows: 1000,
+        cols: 26,
+        data: Array.from({ length: 1000 }, () => Array(26).fill("")),
+        cellStyles: {},
+        colWidths: Array(26).fill(100),
+        rowHeights: Array(1000).fill(30),
+        images: [],
+      };
+      setSheets(prev => [...prev, news]);
+      setActiveSheetIndex(sheets.length);
+      setSaveStatus(`Blatt '${news.name}' hinzugefügt`);
+      return;
+    }
+
+    if (name === "select_sheet") {
+      const idx = sheets.findIndex(s => s.name === args.name || s.id === args.id);
+      if (idx !== -1) setActiveSheetIndex(idx);
+      else if (args.index !== undefined && args.index < sheets.length) setActiveSheetIndex(args.index);
+      return;
+    }
+
+    if (name === "rename_sheet") {
+      setSheets(prev => prev.map((s, i) => (i === activeSheetIndex || s.name === args.oldName) ? { ...s, name: args.newName } : s));
+      return;
+    }
+
+    setSheets(prev => {
+      let targetIdx = activeSheetIndex;
+      if (args.sheetName) {
+        const found = prev.findIndex(s => s.name === args.sheetName);
+        if (found !== -1) targetIdx = found;
+      }
+
+      return prev.map((s, i) => {
+        if (i !== targetIdx) return s;
+        const nextData = [...s.data];
+        const nextStyles = { ...s.cellStyles };
+        let changed = false;
+
+        if (name === "update_values" && args.startCell && args.values) {
+          const start = parseCell(args.startCell);
+          if (start) {
+            args.values.forEach((rowVals: any[], rIdx: number) => {
+              const r = start.r + rIdx;
+              if (r < s.rows) {
+                nextData[r] = [...nextData[r]];
+                rowVals.forEach((val, cIdx) => {
+                  const c = start.c + cIdx;
+                  if (c < s.cols) nextData[r][c] = val?.toString() || "";
+                });
+              }
+            });
+            changed = true;
+          }
+        } else if (name === "format_cells" && args.range && args.style) {
+          const range = parseRange(args.range);
+          if (range) {
+            for (let r = range.start.r; r <= range.end.r; r++) {
+              for (let c = range.start.c; c <= range.end.c; c++) {
+                const styleKey = `${r}-${c}`;
+                nextStyles[styleKey] = { ...nextStyles[styleKey], ...args.style };
+              }
+            }
+            changed = true;
+          }
+        } else if (name === "clear_range" && args.range) {
+          const range = parseRange(args.range);
+          if (range) {
+            for (let r = range.start.r; r <= range.end.r; r++) {
+              nextData[r] = [...nextData[r]];
+              for (let c = range.start.c; c <= range.end.c; c++) {
+                nextData[r][c] = "";
+              }
+            }
+            changed = true;
+          }
+        }
+
+        return changed ? { ...s, data: nextData, cellStyles: nextStyles } : s;
+      });
+    });
+    setSaveStatus("Eliot hat Änderungen vorgenommen.");
   };
 
   const handleAiGenerateTable = async () => {
@@ -2002,8 +2025,11 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
       {/* Formula Bar */}
       <div className="formula-bar">
         <div className="cell-address">
-          {selection.start
-            ? `${String.fromCharCode(65 + selection.start.c)}${selection.start.r + 1}`
+          {selection.start && selection.end
+             // If start != end, show range A1:B2, else just A1
+            ? (selection.start.r !== selection.end.r || selection.start.c !== selection.end.c)
+                ? `${String.fromCharCode(65 + Math.min(selection.start.c, selection.end.c))}${Math.min(selection.start.r, selection.end.r) + 1}:${String.fromCharCode(65 + Math.max(selection.start.c, selection.end.c))}${Math.max(selection.start.r, selection.end.r) + 1}`
+                : `${String.fromCharCode(65 + selection.start.c)}${selection.start.r + 1}`
             : ""}
         </div>
         <div className="formula-icon" style={{ position: "relative" }}>
@@ -2415,14 +2441,9 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
 
                         // Update formula bar to show cell content
                         setFormulaInput(cell || "");
-
-                        // Small delay to allow react to render isActive=true
-                        setTimeout(() => {
-                          document.getElementById(`cell-input-${rIndex}-${cIndex}`)?.focus();
-                        }, 10);
                       }}
                       onMouseEnter={() => {
-                        if (formulaDragging && formulaDragStart && isEditingFormula && selection.start) {
+                        if (formulaDragging && formulaDragStart && isEditingFormula && selectionRef.current.start) {
                           const startCol = String.fromCharCode(65 + formulaDragStart.c);
                           const startRow = formulaDragStart.r + 1;
                           const endCol = String.fromCharCode(65 + cIndex);
@@ -2433,15 +2454,15 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                             : `${startCol}${startRow}:${endCol}${endRow}`;
                           const newFormulaInput = baseFormula + rangeStr;
                           setFormulaInput(newFormulaInput);
-                          handleCellChange(selection.start.r, selection.start.c, newFormulaInput);
+                          handleCellChange(selectionRef.current.start!.r, selectionRef.current.start!.c, newFormulaInput);
                           return;
                         }
                         // This serves as a quick hover-drag fallback for fast mouse movements
-                        if (isDraggingRef.current && selection.start) {
-                          const newSel = { start: selection.start, end: { r: rIndex, c: cIndex } };
+                        if (isDraggingRef.current && selectionRef.current.start) {
+                          const newSel = { start: selectionRef.current.start, end: { r: rIndex, c: cIndex } };
                           setSelection(newSel);
                           selectionRef.current = newSel;
-                        } else if (isFillingRef.current && selection.end) {
+                        } else if (isFillingRef.current && selectionRef.current.end) {
                           setFillEnd({ r: rIndex, c: cIndex });
                           fillEndRef.current = { r: rIndex, c: cIndex };
                         }
@@ -2451,10 +2472,21 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                         id={`cell-input-${rIndex}-${cIndex}`}
                         type="text"
                         value={displayValue || ""}
+                        autoFocus={isActive}
+                        onFocus={(e) => {
+                          setFormulaInput(cell || "");
+                          // Move cursor to end to prevent jumping to start on re-render
+                          const len = e.target.value.length;
+                          e.target.setSelectionRange(len, len);
+                        }}
                         onChange={(e) => handleCellChange(rIndex, cIndex, e.target.value)}
-                        onFocus={() => setFormulaInput(cell || "")}
                         onMouseDown={(e) => {
-                          if (!isActive || isDraggingRef.current) e.preventDefault();
+                           // Allow clicking into the input if it's already active
+                           if (isActive) {
+                             e.stopPropagation();
+                           } else {
+                             if (isDraggingRef.current) e.preventDefault();
+                           }
                         }}
                         style={{
                           color: isError ? "#ef4444" : textColor,
@@ -2604,15 +2636,15 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
             <h2 style={{ textAlign: "center", marginBottom: "1rem" }}>{currentSheet.name}</h2>
             <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "8pt" }}>
               <thead>
-                 <tr>
-                    <th style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>#</th>
-                    {Array.from({ length: Math.min(cols, 10) }).map((_, c) => (
-                      <th key={c} style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>
-                        {String.fromCharCode(65 + c)}
-                      </th>
-                    ))}
-                    {cols > 10 && <th style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>...</th>}
-                 </tr>
+                <tr>
+                  <th style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>#</th>
+                  {Array.from({ length: Math.min(cols, 10) }).map((_, c) => (
+                    <th key={c} style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>
+                      {String.fromCharCode(65 + c)}
+                    </th>
+                  ))}
+                  {cols > 10 && <th style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>...</th>}
+                </tr>
               </thead>
               <tbody>
                 {data.filter(row => row.some(cell => cell !== "")).slice(0, 50).map((row, r) => (
@@ -2684,6 +2716,12 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
           </div>
         ))
       }
+      {/* Eliot AI Chat Integration */}
+      <EliotChat
+        contextData={getGridCSV()}
+        contextType="spreadsheet"
+        onAction={handleEliotAction}
+      />
     </div >
   );
 }

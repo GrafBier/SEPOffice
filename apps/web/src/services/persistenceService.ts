@@ -1,14 +1,7 @@
 /**
- * persistenceService notes:
- * - Documents and their metadata are stored in localStorage under two keys:
- *   - `sepoffice_recent_docs`: JSON array of `DocMetadata` (MRU list, max 10)
- *   - `sepoffice_doc_<id>`: raw document content string
- * - Storage calculations use a UTF-16 assumption (2 bytes per character) which
- *   approximates browser storage usage; this is conservative but useful for
- *   warning the user about localStorage limits.
- * - Quota/QuotaExceeded handling: different browsers throw different errors;
- *   we check common payload shapes and return a friendly warning instead of
- *   letting exceptions bubble to the UI.
+ * persistenceService (SQL API Edition)
+ * - Migrated from localStorage to SQLite via the Backend API (Port 4000).
+ * - All operations are now async.
  */
 export interface DocMetadata {
     id: string;
@@ -22,71 +15,73 @@ export interface SaveResult {
     warning?: string;
 }
 
+const API_BASE = "http://localhost:4000/api";
+
+const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 export const persistenceService = {
-    getRecentDocs(): DocMetadata[] {
-        const data = localStorage.getItem('sepoffice_recent_docs');
-        return data ? JSON.parse(data) : [];
-    },
-
-    getStorageUsage(): { usedBytes: number; usedMB: string; warningLevel: 'ok' | 'warn' | 'critical' } {
-        let total = 0;
-        for (let i = 0; i < localStorage.length; i++) {
-            const key = localStorage.key(i);
-            if (key) {
-                total += (localStorage.getItem(key) || '').length * 2; // UTF-16
+    async getRecentDocs(retries = 3): Promise<DocMetadata[]> {
+        for (let i = 0; i < retries; i++) {
+            try {
+                const res = await fetch(`${API_BASE}/documents`);
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                return await res.json();
+            } catch (err) {
+                console.warn(`API unavailable (Attempt ${i + 1}/${retries}), retrying...`, err);
+                if (i < retries - 1) await wait(1000); // 1s warten vor nächstem Versuch
             }
         }
-        const mb = (total / (1024 * 1024)).toFixed(2);
-        const level = total > 4.5 * 1024 * 1024 ? 'critical' : total > 3.5 * 1024 * 1024 ? 'warn' : 'ok';
-        return { usedBytes: total, usedMB: mb, warningLevel: level };
+        console.error("API permanently unavailable after retries.");
+        return [];
     },
 
-    saveDoc(id: string, name: string, type: 'write' | 'grid' | 'show', content: string): SaveResult {
+    /**
+     * Storage usage is now handled by the OS/SQL, 
+     * but we provide a mock for UI compatibility where needed.
+     */
+    getStorageUsage() {
+        return { usedBytes: 0, usedMB: "SQL", warningLevel: 'ok' as const };
+    },
+
+    async saveDoc(id: string, name: string, type: 'write' | 'grid' | 'show', content: string): Promise<SaveResult> {
         try {
-            const docs = this.getRecentDocs();
-            const existingIndex = docs.findIndex(d => d.id === id);
+            const res = await fetch(`${API_BASE}/documents`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ id, name, type, content }),
+            });
 
-            const meta: DocMetadata = {
-                id,
-                name,
-                type,
-                updatedAt: Date.now()
-            };
-
-            if (existingIndex > -1) {
-                docs.splice(existingIndex, 1);
+            if (res.ok) {
+                return { success: true };
             }
-            docs.unshift(meta);
-
-            localStorage.setItem('sepoffice_recent_docs', JSON.stringify(docs.slice(0, 10)));
-            localStorage.setItem(`sepoffice_doc_${id}`, content);
-
-            const usage = this.getStorageUsage();
-            if (usage.warningLevel === 'critical') {
-                return { success: true, warning: `Speicher fast voll! ${usage.usedMB} MB belegt. Bitte alte Dokumente löschen.` };
-            }
-            if (usage.warningLevel === 'warn') {
-                return { success: true, warning: `Speicher zu ${usage.usedMB} MB belegt.` };
-            }
-            return { success: true };
-        } catch (err: unknown) {
-            const payload = err as { name?: string; code?: number };
-            if (payload?.name === 'QuotaExceededError' || payload?.code === 22) {
-                return { success: false, warning: 'Speicher voll! Das Dokument konnte nicht gespeichert werden. Bitte löschen Sie alte Dokumente.' };
-            }
-            console.error('Save failed:', err);
-            return { success: false, warning: 'Unbekannter Fehler beim Speichern.' };
+            return { success: false, warning: 'Fehler beim Speichern in der Datenbank.' };
+        } catch (err) {
+            console.error('SQL Save failed:', err);
+            return { success: false, warning: 'Verbindung zum Backend fehlgeschlagen.' };
         }
     },
 
-    getDocContent(id: string): string | null {
-        return localStorage.getItem(`sepoffice_doc_${id}`);
+    async getDocContent(id: string): Promise<string | null> {
+        try {
+            const res = await fetch(`${API_BASE}/documents/${id}`);
+            if (!res.ok) return null;
+            const data = await res.json();
+            return data.content || null;
+        } catch (err) {
+            console.error("SQL Load failed:", err);
+            return null;
+        }
     },
 
-    deleteDoc(id: string) {
-        const docs = this.getRecentDocs();
-        const filtered = docs.filter(d => d.id !== id);
-        localStorage.setItem('sepoffice_recent_docs', JSON.stringify(filtered));
-        localStorage.removeItem(`sepoffice_doc_${id}`);
+    async deleteDoc(id: string): Promise<boolean> {
+        try {
+            const res = await fetch(`${API_BASE}/documents/${id}`, {
+                method: "DELETE"
+            });
+            return res.ok;
+        } catch (err) {
+            console.error("SQL Delete failed:", err);
+            return false;
+        }
     }
 };

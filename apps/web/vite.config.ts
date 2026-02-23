@@ -44,17 +44,38 @@ const forcePunycodePolyfill: Plugin = {
 
 // https://vite.dev/config/
 export default defineConfig({
+  /**
+   * FIX: Setting base to './' ensures that assets are resolved relatively, 
+   * which is essential for the Electron file:// protocol.
+   */
   base: './',
   plugins: [
     react(),
-    nodePolyfills(),
+    nodePolyfills({
+      include: ['punycode', 'buffer', 'stream', 'util', 'https', 'http', 'url', 'zlib', 'path', 'fs', 'crypto'],
+      globals: {
+        Buffer: true,
+        process: true,
+      },
+    }),
     forcePunycodePolyfill,
   ],
   resolve: {
     alias: [
-      // html-to-docx -> html-to-vdom needs punycode; force the polyfill file with extension so Rollup finds it
       { find: /^punycode$/, replacement: punycodePolyfill },
       { find: /^rollup-plugin-node-polyfills\/polyfills\/punycode\/?$/, replacement: punycodePolyfill },
     ],
   },
+  /**
+   * FIX: Disabling dependency optimization (noDiscovery) prevents 
+   * Vite from getting stuck on 504 errors for Node.js polyfills.
+   */
+  optimizeDeps: {
+    noDiscovery: true,
+    include: []
+  }
 })
+
+
+
+

@@ -1,4 +1,4 @@
-import React, { useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 /**
  * SepDashboard
  * - Entry surface for the three main apps (SEPWrite, SEPGrid, SEPShow).
@@ -26,7 +26,28 @@ interface SepDashboardProps {
 
 export const SepDashboard: React.FC<SepDashboardProps> = ({ onSelectApp }) => {
     const { t } = useTranslation();
-    const recentDocs = useMemo<DocMetadata[]>(() => persistenceService.getRecentDocs(), []);
+    const [recentDocs, setRecentDocs] = useState<DocMetadata[]>([]);
+    const [isLoading, setIsLoading] = useState(true);
+
+    const loadDocs = useCallback(async () => {
+        setIsLoading(true);
+        const docs = await persistenceService.getRecentDocs();
+        setRecentDocs(docs);
+        setIsLoading(false);
+    }, []);
+
+    useEffect(() => {
+        loadDocs();
+    }, [loadDocs]);
+
+    const handleDelete = async (e: React.MouseEvent, id: string) => {
+        e.stopPropagation();
+        if (confirm("Möchten Sie dieses Dokument wirklich unwiderruflich löschen?")) {
+            await persistenceService.deleteDoc(id);
+            loadDocs();
+        }
+    };
+
     type AppCard = {
         id: 'write' | 'grid' | 'show';
         name: string;
@@ -103,19 +124,19 @@ export const SepDashboard: React.FC<SepDashboardProps> = ({ onSelectApp }) => {
                             overflow: 'hidden'
                         }}
                     >
-                            <div style={{
-                                position: 'absolute',
-                                top: 0,
-                                right: 0,
-                                padding: '0.75rem 1.25rem',
-                                background: app.id === 'show' ? '#f59e0b' : 'rgba(255,255,255,0.05)',
-                                color: app.id === 'show' ? '#0f172a' : '#94a3b8',
-                                fontSize: '0.75rem',
-                                fontWeight: 700,
-                                borderBottomLeftRadius: '12px'
-                            }}>
-                                {app.status}
-                            </div>
+                        <div style={{
+                            position: 'absolute',
+                            top: 0,
+                            right: 0,
+                            padding: '0.75rem 1.25rem',
+                            background: app.id === 'show' ? '#f59e0b' : 'rgba(255,255,255,0.05)',
+                            color: app.id === 'show' ? '#0f172a' : '#94a3b8',
+                            fontSize: '0.75rem',
+                            fontWeight: 700,
+                            borderBottomLeftRadius: '12px'
+                        }}>
+                            {app.status}
+                        </div>
 
                         <div style={{ marginBottom: '1.5rem' }}>
                             {app.icon}
@@ -155,7 +176,9 @@ export const SepDashboard: React.FC<SepDashboardProps> = ({ onSelectApp }) => {
                     <h3 style={{ color: '#e2e8f0', fontSize: '1.25rem' }}>{t('recent_docs')}</h3>
                 </div>
 
-                {recentDocs.length === 0 ? (
+                {isLoading ? (
+                    <div style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>Lade Dokumente...</div>
+                ) : recentDocs.length === 0 ? (
                     <div style={{
                         background: 'rgba(15, 23, 42, 0.3)',
                         border: '1px solid rgba(255, 255, 255, 0.05)',
@@ -181,7 +204,8 @@ export const SepDashboard: React.FC<SepDashboardProps> = ({ onSelectApp }) => {
                                     display: 'flex',
                                     alignItems: 'center',
                                     gap: '1rem',
-                                    transition: 'all 0.2s'
+                                    transition: 'all 0.2s',
+                                    position: 'relative'
                                 }}
                                 className="recent-item"
                             >
@@ -206,6 +230,24 @@ export const SepDashboard: React.FC<SepDashboardProps> = ({ onSelectApp }) => {
                                         {new Date(doc.updatedAt).toLocaleDateString()} {new Date(doc.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                                     </div>
                                 </div>
+                                <button
+                                    onClick={(e) => handleDelete(e, doc.id)}
+                                    title="Löschen"
+                                    style={{
+                                        background: 'transparent',
+                                        border: 'none',
+                                        color: '#ef4444',
+                                        padding: '0.5rem',
+                                        cursor: 'pointer',
+                                        borderRadius: '6px',
+                                        opacity: 0.5,
+                                        transition: 'all 0.2s'
+                                    }}
+                                    onMouseEnter={e => (e.currentTarget.style.opacity = '1')}
+                                    onMouseLeave={e => (e.currentTarget.style.opacity = '0.5')}
+                                >
+                                    🗑️
+                                </button>
                             </div>
                         ))}
                     </div>

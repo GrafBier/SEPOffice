@@ -124,7 +124,7 @@ interface OpenAICompletionResponse {
     };
 }
 
-const completionToText = (value: ChatCompletionResponse): string => {
+export const completionToText = (value: ChatCompletionResponse): string => {
     if (Array.isArray(value)) {
         return value.map((call) => call.function.arguments ?? "").join("\n");
     }
@@ -133,25 +133,49 @@ const completionToText = (value: ChatCompletionResponse): string => {
 
 // ── Core Chat Completion ──────────────────────────────────────────────
 
-async function chatCompletion(settings: AISettings, systemPrompt: string, userMessage: string, tools?: ChatCompletionTools): Promise<ChatCompletionResponse> {
+export async function chatCompletion(settings: AISettings, messages: { role: string; content: string }[], tools?: ChatCompletionTools): Promise<ChatCompletionResponse> {
     if (settings.provider === "local") {
-        return localCompletion(settings, systemPrompt, userMessage);
+        // Convert messages to single prompt for local models that don't support chat format directly yet
+        const prompt = messages.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join("\n\n");
+        return localCompletion(settings, "", prompt);
     }
     // OpenAI-compatible API (Groq, OpenAI, LMStudio, Jan.AI, Ollama /v1)
-    return openaiCompatibleCompletion(settings, systemPrompt, userMessage, tools);
+    return openaiCompatibleCompletion(settings, messages, tools);
 }
 
+
+
 async function localCompletion(settings: AISettings, systemPrompt: string, userMessage: string): Promise<string> {
-    const res = await fetch(`${settings.baseUrl}/api/complete`, {
+    const fullPrompt = systemPrompt ? `${systemPrompt}\n\n${userMessage}` : userMessage;
+    const res = await fetchWithTimeout(`${settings.baseUrl}/api/complete`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ text: `${systemPrompt}\n\n${userMessage}`, max_new_tokens: 512 }),
+        // Local python service expects "text" field
+        body: JSON.stringify({ text: fullPrompt, max_new_tokens: 1024 }),
     });
     const json = await res.json();
     return json.completion || "";
 }
 
-async function openaiCompatibleCompletion(settings: AISettings, systemPrompt: string, userMessage: string, tools?: ChatCompletionTools): Promise<ChatCompletionResponse> {
+const DEFAULT_TIMEOUT = 60000; // 60 seconds
+
+async function fetchWithTimeout(url: string, options: RequestInit, timeout = DEFAULT_TIMEOUT) {
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(id);
+        return response;
+    } catch (e) {
+        clearTimeout(id);
+        if (e instanceof Error && e.name === 'AbortError') {
+            throw new Error(`AI Request timed out after ${timeout / 1000}s`);
+        }
+        throw e;
+    }
+}
+
+async function openaiCompatibleCompletion(settings: AISettings, messages: { role: string; content: string }[], tools?: ChatCompletionTools): Promise<ChatCompletionResponse> {
     const endpoint = settings.provider === "ollama"
         ? `${settings.baseUrl}/api/chat`
         : `${settings.baseUrl}/chat/completions`;
@@ -161,12 +185,15 @@ async function openaiCompatibleCompletion(settings: AISettings, systemPrompt: st
         headers["Authorization"] = `Bearer ${settings.apiKey}`;
     }
 
+    // Map roles to standard OpenAI roles
+    const apiMessages = messages.map(m => ({
+        role: m.role as "system" | "user" | "assistant",
+        content: m.content
+    }));
+
     const body: OpenAIRequestBody = {
         model: settings.model || PROVIDER_DEFAULTS[settings.provider].models[0],
-        messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: userMessage },
-        ],
+        messages: apiMessages,
         temperature: settings.temperature,
     };
 
@@ -179,7 +206,7 @@ async function openaiCompatibleCompletion(settings: AISettings, systemPrompt: st
         body.stream = false;
     }
 
-    const res = await fetch(endpoint, {
+    const res = await fetchWithTimeout(endpoint, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
@@ -212,7 +239,7 @@ async function openaiCompatibleCompletion(settings: AISettings, systemPrompt: st
 
 export async function generateFormula(settings: AISettings, query: string): Promise<string> {
     if (settings.provider === "local") {
-        const res = await fetch(`${settings.baseUrl}/api/formula`, {
+        const res = await fetchWithTimeout(`${settings.baseUrl}/api/formula`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ query }),
@@ -224,8 +251,8 @@ export async function generateFormula(settings: AISettings, query: string): Prom
     const result = completionToText(
         await chatCompletion(
             settings,
-            "Du bist ein Excel-Formel-Experte. Gib NUR die Formel zurück, ohne Erklärung. Die Formel muss mit = beginnen. Verwende englische Funktionsnamen (SUM, IF, VLOOKUP etc.).",
-            query,
+            [{ role: "system", content: "Du bist ein Excel-Formel-Experte. Gib NUR die Formel zurück, ohne Erklärung. Die Formel muss mit = beginnen. Verwende englische Funktionsnamen (SUM, IF, VLOOKUP etc.)." },
+            { role: "user", content: query }],
         ),
     );
     // Extract formula (starts with =)
@@ -235,7 +262,7 @@ export async function generateFormula(settings: AISettings, query: string): Prom
 
 export async function explainError(settings: AISettings, error: string, formula: string): Promise<string> {
     if (settings.provider === "local") {
-        const res = await fetch(`${settings.baseUrl}/api/explain_error`, {
+        const res = await fetchWithTimeout(`${settings.baseUrl}/api/explain_error`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ error, formula }),
@@ -247,15 +274,15 @@ export async function explainError(settings: AISettings, error: string, formula:
     return completionToText(
         await chatCompletion(
             settings,
-            "Du bist ein Tabellenkalkulations-Experte. Erkläre den Fehler kurz und präzise in 1-2 Sätzen und schlage eine Lösung vor.",
-            `Die Formel "${formula}" hat den Fehler "${error}" zurückgegeben. Was ist das Problem und wie kann man es beheben?`,
+            [{ role: "system", content: "Du bist ein Tabellenkalkulations-Experte. Erkläre den Fehler kurz und präzise in 1-2 Sätzen und schlage eine Lösung vor." },
+            { role: "user", content: `Die Formel "${formula}" hat den Fehler "${error}" zurückgegeben. Was ist das Problem und wie kann man es beheben?` }],
         ),
     );
 }
 
 export async function smartFill(settings: AISettings, items: string[]): Promise<string[]> {
     if (settings.provider === "local") {
-        const res = await fetch(`${settings.baseUrl}/api/smart_fill`, {
+        const res = await fetchWithTimeout(`${settings.baseUrl}/api/smart_fill`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ items }),
@@ -267,8 +294,8 @@ export async function smartFill(settings: AISettings, items: string[]): Promise<
     const result = completionToText(
         await chatCompletion(
             settings,
-            "Du analysierst Datenreihen und erkennst Muster. Gib NUR die fehlenden Werte als JSON-Array zurück, z.B. [\"Wert1\", \"Wert2\"]. Keine Erklärung.",
-            `Hier sind die ersten Werte einer Spalte (leere Strings sind Lücken): ${JSON.stringify(items)}. Erkenne das Muster und fülle die Lücken.`,
+            [{ role: "system", content: "Du analysierst Datenreihen und erkennst Muster. Gib NUR die fehlenden Werte als JSON-Array zurück, z.B. [\"Wert1\", \"Wert2\"]. Keine Erklärung." },
+            { role: "user", content: `Hier sind die ersten Werte einer Spalte (leere Strings sind Lücken): ${JSON.stringify(items)}. Erkenne das Muster und fülle die Lücken.` }],
         ),
     );
 
@@ -282,7 +309,7 @@ export async function smartFill(settings: AISettings, items: string[]): Promise<
 export async function gridAction(settings: AISettings, context: string, instruction: string, gridData: string[][], computedData: string[][]): Promise<GridActionResult> {
     // If AI provider is `local`, use the legacy fallback format (local HTTP API).
     if (settings.provider === "local") {
-        const res = await fetch(`${settings.baseUrl}/api/grid_action`, {
+        const res = await fetchWithTimeout(`${settings.baseUrl}/api/grid_action`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ context, instruction, gridData, computedData }),
@@ -375,8 +402,8 @@ Rechne nicht im Klartext zurück! Gib KEINE Erklärungen. Ruf ZWINGEND eines der
 
     const result = await chatCompletion(
         settings,
-        sysPrompt,
-        `Kontext: ${context}\nAnweisung: ${instruction}\nAktuelle Daten (Top 20x10):\n${JSON.stringify(sampleData)}`,
+        [{ role: "system", content: sysPrompt },
+        { role: "user", content: `Kontext: ${context}\nAnweisung: ${instruction}\nAktuelle Daten (Top 20x10):\n${JSON.stringify(sampleData)}` }],
         tools
     );
 
@@ -398,7 +425,7 @@ Rechne nicht im Klartext zurück! Gib KEINE Erklärungen. Ruf ZWINGEND eines der
 
 export async function optimizeText(settings: AISettings, text: string): Promise<string> {
     if (settings.provider === "local") {
-        const res = await fetch(`${settings.baseUrl}/api/optimize_text`, {
+        const res = await fetchWithTimeout(`${settings.baseUrl}/api/optimize_text`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text }),
@@ -410,15 +437,15 @@ export async function optimizeText(settings: AISettings, text: string): Promise<
     return completionToText(
         await chatCompletion(
             settings,
-            "Du bist ein professioneller Lektor. Korrigiere Grammatik und Rechtschreibung des folgenden Textes. Behalte den Ton bei. Gib NUR den korrigierten Text zurück, ohne Erklärung.",
-            text,
+            [{ role: "system", content: "Du bist ein professioneller Lektor. Korrigiere Grammatik und Rechtschreibung des folgenden Textes. Behalte den Ton bei. Gib NUR den korrigierten Text zurück, ohne Erklärung." },
+            { role: "user", content: text }]
         ),
     );
 }
 
 export async function completeText(settings: AISettings, text: string): Promise<string> {
     if (settings.provider === "local") {
-        const res = await fetch(`${settings.baseUrl}/api/complete`, {
+        const res = await fetchWithTimeout(`${settings.baseUrl}/api/complete`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ text, max_new_tokens: 5 }),
@@ -430,8 +457,8 @@ export async function completeText(settings: AISettings, text: string): Promise<
     const result = completionToText(
         await chatCompletion(
             settings,
-            "Du vervollständigst Texte. Gib NUR die nächsten 3-8 Wörter zurück, die den Satz natürlich fortsetzen. Keine Erklärung, nur die Fortsetzung.",
-            `Vervollständige diesen Text: "${text}"`,
+            [{ role: "system", content: "Du vervollständigst Texte. Gib NUR die nächsten 3-8 Wörter zurück, die den Satz natürlich fortsetzen. Keine Erklärung, nur die Fortsetzung." },
+            { role: "user", content: `Vervollständige diesen Text: "${text}"` }]
         ),
     );
     return result.trim();
@@ -443,11 +470,11 @@ export async function generateDocument(settings: AISettings, prompt: string): Pr
     return completionToText(
         await chatCompletion(
             settings,
-            `Du bist ein professioneller Dokumenten-Ersteller. Erstelle ein vollständiges HTML-Dokument basierend auf der Anweisung des Benutzers.
+            [{ role: "system", content: `Du bist ein professioneller Dokumenten-Ersteller. Erstelle ein vollständiges HTML-Dokument basierend auf der Anweisung des Benutzers.
 Verwende semantisches HTML: <h1>, <h2>, <p>, <ul>, <li>, <table>, <strong>, <em> etc.
 Gib NUR den HTML-Inhalt zurück, kein <html>, <head> oder <body> Tag. Nur den Dokumentinhalt.
-Schreibe qualitativ hochwertigen, formatierten Inhalt.`,
-            prompt,
+Schreibe qualitativ hochwertigen, formatierten Inhalt.` },
+            { role: "user", content: prompt }]
         ),
     );
 }
@@ -456,11 +483,11 @@ export async function generateSpreadsheet(settings: AISettings, prompt: string, 
     const result = completionToText(
         await chatCompletion(
             settings,
-            `Du bist ein Tabellenerstellungs-Experte. Basierend auf der Anweisung des Benutzers, erstelle Tabellendaten.
+            [{ role: "system", content: `Du bist ein Tabellenerstellungs-Experte. Basierend auf der Anweisung des Benutzers, erstelle Tabellendaten.
 Gib das Ergebnis als JSON 2D-Array zurück. Die erste Zeile soll die Spaltenüberschriften enthalten.
 Format: [["Header1","Header2"],["Wert1","Wert2"],...]
-Gib NUR das Array zurück, keine Erklärung. Maximal ${currentCols} Spalten.`,
-            prompt,
+Gib NUR das Array zurück, keine Erklärung. Maximal ${currentCols} Spalten.` },
+            { role: "user", content: prompt }]
         ),
     );
 
@@ -483,7 +510,7 @@ WICHTIG: Erfinde keine Fakten, gib im Zweifel an, dass die Quelle unbekannt ist 
 
     try {
         const response = completionToText(
-            await chatCompletion(settings, "Du bist eine hilfreiche Recherche-KI für Bild-Captions.", prompt),
+            await chatCompletion(settings, [{ role: "system", content: "Du bist eine hilfreiche Recherche-KI für Bild-Captions." }, { role: "user", content: prompt }]),
         );
         return response.trim() || "Keine Quellenangabe verfügbar.";
     } catch (err: unknown) {
@@ -542,14 +569,14 @@ export async function generateSlideOutline(settings: AISettings, topic: string):
     const result = completionToText(
         await chatCompletion(
             settings,
-            `Du bist ein Präsentations-Experte. Erstelle eine strukturierte Gliederung für eine Präsentation.
+            [{ role: "system", content: `Du bist ein Präsentations-Experte. Erstelle eine strukturierte Gliederung für eine Präsentation.
 Gib das Ergebnis als JSON-Array zurück. Jedes Element hat:
 - "title": Folientitel
 - "bullets": Array mit 2-4 Stichpunkten
 - "layout": eines von "title", "title-content", "two-columns", "image-left", "image-right", "blank"
 Die erste Folie sollte layout "title" sein.
-Gib NUR das JSON-Array zurück, keine Erklärung. 5-10 Folien.`,
-            `Erstelle eine Präsentation zum Thema: "${topic}"`,
+Gib NUR das JSON-Array zurück, keine Erklärung. 5-10 Folien.` },
+            { role: "user", content: `Erstelle eine Präsentation zum Thema: "${topic}"` }],
         ),
     );
 
@@ -564,11 +591,11 @@ export async function magicLayout(settings: AISettings, elements: { id: string; 
     const result = completionToText(
         await chatCompletion(
             settings,
-            `Du bist ein Grafik-Designer. Arrangiere die gegebenen Elemente ästhetisch auf einer 960x540 Pixel Folie.
+            [{ role: "system", content: `Du bist ein Grafik-Designer. Arrangiere die gegebenen Elemente ästhetisch auf einer 960x540 Pixel Folie.
 Beachte: Goldenen Schnitt, gleichmäßige Abstände, visuelles Gleichgewicht. Mindestens 40px Rand.
 Gib ein JSON-Array zurück mit: [{"id": "...", "x": ..., "y": ..., "width": ..., "height": ...}]
-NUR das Array, keine Erklärung.`,
-            `Elemente: ${JSON.stringify(elements)}`,
+NUR das Array, keine Erklärung.` },
+            { role: "user", content: `Elemente: ${JSON.stringify(elements)}` }],
         ),
     );
 
@@ -583,11 +610,11 @@ export async function vibeCheckSlides(settings: AISettings, texts: string[], ton
     const result = completionToText(
         await chatCompletion(
             settings,
-            `Du bist ein Präsentations-Coach. Ändere den Tonfall der folgenden Texte gemäß der Anweisung.
+            [{ role: "system", content: `Du bist ein Präsentations-Coach. Ändere den Tonfall der folgenden Texte gemäß der Anweisung.
 Behalte die Struktur (Stichpunkte, Überschriften) bei, ändere nur den Ausdruck.
 Gib ein JSON-Array mit den überarbeiteten Texten zurück. Gleiche Reihenfolge wie der Input.
-NUR das Array, keine Erklärung.`,
-            `Tonfall-Anweisung: "${tone}"\nTexte: ${JSON.stringify(texts)}`,
+NUR das Array, keine Erklärung.` },
+            { role: "user", content: `Tonfall-Anweisung: "${tone}"\nTexte: ${JSON.stringify(texts)}` }],
         ),
     );
 
@@ -602,10 +629,10 @@ export async function generateSpeakerNotes(settings: AISettings, slideTitle: str
     return completionToText(
         await chatCompletion(
             settings,
-            `Du bist ein Rhetorik-Trainer. Basierend auf der Folie schreibe ausformulierte Sprechernotizen.
+            [{ role: "system", content: `Du bist ein Rhetorik-Trainer. Basierend auf der Folie schreibe ausformulierte Sprechernotizen.
 Diese sollen dem Redner als Leitfaden dienen. 3-5 Sätze pro Folie. Natürlich und professionell.
-Gib NUR die Notizen zurück, keine Erklärung.`,
-            `Folientitel: "${slideTitle}"\nStichpunkte: ${bullets}`,
+Gib NUR die Notizen zurück, keine Erklärung.` },
+            { role: "user", content: `Folientitel: "${slideTitle}"\nStichpunkte: ${bullets}` }]
         ),
     );
 }

@@ -42,6 +42,7 @@ import { useAISettings } from '../contexts/AISettingsContext';
 import * as aiSvc from '../services/aiService';
 import PptxGenJS from "pptxgenjs";
 import { useTranslation } from "react-i18next";
+import { EliotChat } from './EliotChat';
 
 // ── Helpers ───────────────────────────────────────────────────────────
 
@@ -224,37 +225,40 @@ const SepShow: React.FC<SepShowProps> = ({ docId }) => {
     const activeSlide = slides[activeIndex] || slides[0];
 
     // ── Persistence ─────────────────────────────────────────────────────
-
     React.useEffect(() => {
-        if (!currentDocId) {
-            const newId = `show-${Date.now()}`;
-            setCurrentDocId(newId);
-            const { docName: snapshotDocName, slides: snapshotSlides } = persistenceSnapshotRef.current;
-            persistenceService.saveDoc(newId, snapshotDocName, 'show', JSON.stringify(snapshotSlides));
-            return;
-        }
-        const meta = persistenceService.getRecentDocs().find(d => d.id === currentDocId);
-        if (meta && meta.type !== 'show') {
-            const newId = `show-${Date.now()}`;
-            setCurrentDocId(newId);
-            return;
-        }
-        const savedContent = persistenceService.getDocContent(currentDocId);
-        if (savedContent) {
-            try {
-                const parsed = JSON.parse(savedContent);
-                if (Array.isArray(parsed) && parsed.length > 0) setSlides(parsed);
-                if (meta) setDocName(meta.name);
-            } catch (e) { console.error('Failed to load show content', e); }
-        }
+        const loadContent = async () => {
+            if (!currentDocId) {
+                const newId = `show-${Date.now()}`;
+                setCurrentDocId(newId);
+                const { docName: snapshotDocName, slides: snapshotSlides } = persistenceSnapshotRef.current;
+                await persistenceService.saveDoc(newId, snapshotDocName, 'show', JSON.stringify(snapshotSlides));
+                return;
+            }
+            const docs = await persistenceService.getRecentDocs();
+            const meta = docs.find(d => d.id === currentDocId);
+            if (meta && meta.type !== 'show') {
+                const newId = `show-${Date.now()}`;
+                setCurrentDocId(newId);
+                return;
+            }
+            const savedContent = await persistenceService.getDocContent(currentDocId);
+            if (savedContent) {
+                try {
+                    const parsed = JSON.parse(savedContent);
+                    if (Array.isArray(parsed) && parsed.length > 0) setSlides(parsed);
+                    if (meta) setDocName(meta.name);
+                } catch (e) { console.error('Failed to load show content', e); }
+            }
+        };
+        loadContent();
     }, [currentDocId]);
 
     React.useEffect(() => {
         if (!currentDocId) return;
         if (saveTimeoutRef.current) window.clearTimeout(saveTimeoutRef.current);
         setSaveStatus('Speichere...');
-        saveTimeoutRef.current = window.setTimeout(() => {
-            const result = persistenceService.saveDoc(currentDocId, docName, 'show', JSON.stringify(slides));
+        saveTimeoutRef.current = window.setTimeout(async () => {
+            const result = await persistenceService.saveDoc(currentDocId, docName, 'show', JSON.stringify(slides));
             setSaveStatus(result.warning || 'Alle Änderungen gespeichert');
         }, 1000) as unknown as number;
     }, [slides, currentDocId, docName]);
@@ -568,7 +572,7 @@ const SepShow: React.FC<SepShowProps> = ({ docId }) => {
 
         for (const slide of slides) {
             const pptSlide = pptx.addSlide();
-            
+
             // Background (basic color only in this simple implementation)
             if (slide.background.startsWith('#')) {
                 pptSlide.background = { fill: slide.background.replace('#', '') };
@@ -584,14 +588,14 @@ const SepShow: React.FC<SepShowProps> = ({ docId }) => {
                 };
 
                 if (el.type === 'text') {
-                        const textAlign: 'left' | 'center' | 'right' = el.align === 'center' || el.align === 'right' ? el.align : 'left';
-                        pptSlide.addText(el.text || '', {
-                            ...props,
-                            fontSize: (el.fontSize || 20) * 0.75,
-                            color: (el.fill || '#000000').replace('#', ''),
-                            align: textAlign,
-                            fontFace: 'Arial',
-                        });
+                    const textAlign: 'left' | 'center' | 'right' = el.align === 'center' || el.align === 'right' ? el.align : 'left';
+                    pptSlide.addText(el.text || '', {
+                        ...props,
+                        fontSize: (el.fontSize || 20) * 0.75,
+                        color: (el.fill || '#000000').replace('#', ''),
+                        align: textAlign,
+                        fontFace: 'Arial',
+                    });
                 } else if (el.type === 'image' && el.src) {
                     pptSlide.addImage({
                         data: el.src, // Base64 works
@@ -631,6 +635,26 @@ const SepShow: React.FC<SepShowProps> = ({ docId }) => {
     }, []);
 
     // ── Render ──────────────────────────────────────────────────────────
+
+    const handleEliotAction = (name: string, args: any) => {
+        if (name === 'add_slide') {
+            const newSlide = createSlide(args.layout || 'bullet');
+            if (args.title) {
+                const titleEl = newSlide.elements.find(e => e.type === 'text' && e.fontSize && e.fontSize > 30);
+                if (titleEl) titleEl.text = args.title;
+            }
+            setSlides(prev => [...prev, newSlide]);
+            setActiveIndex(slides.length);
+        } else if (name === 'update_current_slide') {
+            const newSlides = [...slides];
+            const current = { ...newSlides[activeIndex] };
+            if (args.elements) {
+                current.elements = [...current.elements, ...args.elements.map((e: any) => ({ ...e, id: uid() }))];
+            }
+            newSlides[activeIndex] = current;
+            setSlides(newSlides);
+        }
+    };
 
     return (
         <div style={{ display: 'flex', height: '100%', background: '#0c1222', color: '#e2e8f0', overflow: 'hidden' }}>
@@ -983,6 +1007,12 @@ const SepShow: React.FC<SepShowProps> = ({ docId }) => {
                     </div>
                 </>
             )}
+            {/* Eliot AI Chat Integration */}
+            <EliotChat
+                contextData={JSON.stringify(slides.map(s => ({ elements: s.elements.filter(e => e.type === 'text').map(e => e.text) })), null, 2)}
+                contextType="presentation"
+                onAction={handleEliotAction}
+            />
         </div>
     );
 };

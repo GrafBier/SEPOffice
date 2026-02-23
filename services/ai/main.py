@@ -1,12 +1,30 @@
-from fastapi import FastAPI
+# MUST be the very first thing for PyInstaller + Windows multiprocessing.
+# Without this, uvicorn worker processes re-execute the whole script and
+# try to bind port 8080 a second time -> EADDRINUSE / WinError 10048.
+import multiprocessing
+multiprocessing.freeze_support()
+
+print("AI Service: Script started.")
+import sys
+import os
+import json
+import threading
+import uvicorn
+from typing import Optional
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from transformers import pipeline
-import threading
-from pydantic import BaseModel
-from typing import Optional
+
+print("AI Service: Base imports done.")
+print("AI Service: Preparing fast startup...")
+
+# Moved transformers import inside lazy loader to unblock server startup
+# from transformers import pipeline, AutoTokenizer, AutoModelForCausalLM
+
+print(f"AI Service: Current working directory: {os.getcwd()}")
 
 app = FastAPI(title="SEPOffice AI Service")
+print("AI Service: FastAPI app initialized.")
 
 app.add_middleware(
     CORSMiddleware,
@@ -45,20 +63,91 @@ class GridActionRequest(BaseModel):
 
 # Global AI generator
 generator = None
+last_error = None
+model_loading = False
+loading_progress = 0
+import asyncio
+
+async def background_model_load():
+    global generator, last_error, model_loading, loading_progress
+    model_loading = True
+    loading_progress = 0
+    print("AI Service: Starting background model loading...")
+    
+    import sys
+    # Base directory for finding the model
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+        bundled_model_path = os.path.join(base_dir, "ai", "model")
+        if not os.path.isdir(bundled_model_path):
+            bundled_model_path = os.path.join(base_dir, "model")
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        bundled_model_path = os.path.join(base_dir, "model")
+
+    model_to_load = "Qwen/Qwen2.5-0.5B"
+    if os.path.isdir(bundled_model_path):
+        print(f"Loading bundled model from: {bundled_model_path}")
+        model_to_load = bundled_model_path
+    else:
+        print(f"Model directory not found at {bundled_model_path}. Fallback to HF cache.")
+
+    try:
+        # Load in a separate thread to not block the event loop
+        def _load():
+            global loading_progress
+            print(f"Initializing pipeline with model: {model_to_load}")
+
+            # Import only what we need
+            from transformers import pipeline
+
+            # Single step: pipeline() handles tokenizer + model internally.
+            # We avoid AutoModelForCausalLM + device_map which requires `accelerate`.
+            loading_progress = 10
+            pipe = pipeline(
+                "text-generation",
+                model=model_to_load,
+                tokenizer=model_to_load,
+                max_new_tokens=15,
+                do_sample=False,
+                device=-1,          # -1 = CPU, no accelerate needed
+                trust_remote_code=True,
+            )
+            loading_progress = 100
+            return pipe
+        
+        # Run the heavy loading in a thread executer
+        loop = asyncio.get_event_loop()
+        generator = await loop.run_in_executor(None, _load)
+        print("Model loaded successfully.")
+    except Exception as e:
+        last_error = str(e)
+        loading_progress = 0
+        print("Failed to load model:", e)
+    finally:
+        model_loading = False
 
 @app.on_event("startup")
-def load_model():
-    global generator
-    print("Loading language model (Qwen2.5-0.5B)...")
-    try:
-        generator = pipeline("text-generation", model="Qwen/Qwen2.5-0.5B", max_new_tokens=15, do_sample=False)
-        print("Model loaded.")
-    except Exception as e:
-        print("Failed to load model:", e)
+async def startup_event():
+    import asyncio
+    # Schedule the model loading as a background task
+    asyncio.create_task(background_model_load())
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "service": "ai"}
+    status = "ok"
+    if model_loading:
+        status = "loading"
+    elif generator is None:
+        status = "error" if last_error else "uninitialized"
+        
+    return {
+        "status": status, 
+        "service": "ai",
+        "model_loaded": generator is not None,
+        "progress": loading_progress,
+        "last_error": last_error
+    }
 
 @app.post("/api/correct")
 def correct_text(req: CorrectionRequest):
@@ -195,13 +284,17 @@ Antworte AUSSCHLIESSLICH mit einem validen JSON Array aus Arrays (die neue Matri
 Ergebnis JSON:"""
 
     try:
+        print(f"--- PROMPT ---\n{prompt}\n--- END PROMPT ---")
         out = generator(prompt, max_new_tokens=400, num_return_sequences=1)
         generated_text = out[0]["generated_text"]
+        print(f"--- GENERATED TEXT ---\n{generated_text}\n--- END GENERATED ---")
         
         if generated_text.startswith(prompt):
             json_response = generated_text[len(prompt):].strip()
         else:
             json_response = generated_text.replace(prompt, "").strip()
+        
+        print(f"--- JSON RESPONSE CANDIDATE ---\n{json_response}\n--- END ---")
         
         # Clean up any markdown blocks if the AI insists on adding them
         json_response = json_response.removeprefix("```json").removeprefix("```").removesuffix("```").strip()
@@ -232,3 +325,7 @@ Ergebnis JSON:"""
     except Exception as e:
         print("Error during grid action:", e)
         return {"new_grid_data": req.gridData}
+
+if __name__ == "__main__":
+    # Start the FastAPI server on port 8080.
+    uvicorn.run(app, host="0.0.0.0", port=8080)

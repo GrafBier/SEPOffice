@@ -51,6 +51,26 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
             :root {
                 --print-margin: ${marginCSS};
             }
+            
+            /* Print Preview Overrides */
+            .print-preview-content .ProseMirror {
+                background: white !important;
+                color: black !important;
+            }
+            .print-preview-content .ProseMirror p, 
+            .print-preview-content .ProseMirror h1, 
+            .print-preview-content .ProseMirror h2, 
+            .print-preview-content .ProseMirror h3,
+            .print-preview-content .ProseMirror ul, 
+            .print-preview-content .ProseMirror ol, 
+            .print-preview-content .ProseMirror li,
+            .print-preview-content .ProseMirror span {
+                color: black !important;
+            }
+            .print-preview-content .ProseMirror blockquote {
+                border-left-color: #000 !important;
+                color: #444 !important;
+            }
         `;
 
         return () => {
@@ -295,7 +315,7 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                                 overflow: "hidden"
                             }}>
                                 {/* The actual content that will be printed */}
-                                <div style={{
+                                <div className="print-preview-content" style={{
                                     transform: "scale(0.5)", // Scale down the real content to fit our small simulation box
                                     transformOrigin: "top left",
                                     width: "200%", // compensate for scale
