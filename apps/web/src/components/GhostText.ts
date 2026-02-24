@@ -6,6 +6,7 @@ const pluginKey = new PluginKey('ghostText')
 
 export interface GhostTextOptions {
     getSuggestion: (text: string) => Promise<string>
+    enabled: boolean
 }
 
 export const GhostText = Extension.create<GhostTextOptions>({
@@ -14,6 +15,7 @@ export const GhostText = Extension.create<GhostTextOptions>({
     addOptions() {
         return {
             getSuggestion: async () => '',
+            enabled: true,
         }
     },
 
@@ -90,6 +92,16 @@ export const GhostText = Extension.create<GhostTextOptions>({
                     return {
                         update: (view, prevState) => {
                             if (view.state.doc.eq(prevState.doc)) return
+
+                            // Check if ghost text is enabled
+                            if (!this.options.enabled) {
+                                // Clear any existing suggestion
+                                if (currentSuggestion) {
+                                    currentSuggestion = ''
+                                    view.dispatch(view.state.tr.setMeta(pluginKey, ''))
+                                }
+                                return
+                            }
 
                             // Debounced fetch
                             if (timeout) window.clearTimeout(timeout)

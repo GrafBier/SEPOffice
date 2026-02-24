@@ -39,7 +39,12 @@ class CorrectionRequest(BaseModel):
 
 class CompletionRequest(BaseModel):
     text: str
-    max_new_tokens: Optional[int] = 10
+    max_new_tokens: Optional[int] = 200
+
+class ChatRequest(BaseModel):
+    messages: list[dict]
+    max_new_tokens: Optional[int] = 1024
+    temperature: Optional[float] = 0.7
 
 class FormulaRequest(BaseModel):
     query: str
@@ -149,6 +154,52 @@ def health_check():
         "last_error": last_error
     }
 
+@app.post("/api/chat")
+async def chat_completion(req: ChatRequest):
+    """OpenAI-compatible chat endpoint for local model."""
+    if not generator:
+        raise HTTPException(status_code=503, detail="Model not loaded yet")
+    
+    try:
+        # Build a single prompt from the messages
+        prompt_parts = []
+        for msg in req.messages:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            if role == "system":
+                prompt_parts.append(f"System: {content}")
+            elif role == "user":
+                prompt_parts.append(f"User: {content}")
+            elif role == "assistant":
+                prompt_parts.append(f"Assistant: {content}")
+        prompt_parts.append("Assistant:")
+        full_prompt = "\n\n".join(prompt_parts)
+        
+        # Limit prompt length to prevent OOM
+        if len(full_prompt) > 2000:
+            full_prompt = full_prompt[-2000:]
+        
+        out = generator(full_prompt, max_new_tokens=req.max_new_tokens or 1024, num_return_sequences=1)
+        generated_text = out[0]["generated_text"]
+        
+        if generated_text.startswith(full_prompt):
+            response_text = generated_text[len(full_prompt):].strip()
+        else:
+            response_text = generated_text.strip()
+        
+        # Return in OpenAI-compatible format
+        return {
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": response_text
+                }
+            }]
+        }
+    except Exception as e:
+        print(f"Chat error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/correct")
 def correct_text(req: CorrectionRequest):
     # Dummy correction for MVP
@@ -165,18 +216,19 @@ def complete_text(req: CompletionRequest):
         return {"completion": ""}
         
     try:
-        # Prompt model 
-        out = generator(req.text, num_return_sequences=1)
+        max_tokens = min(req.max_new_tokens or 200, 1024)
+        out = generator(context, max_new_tokens=max_tokens, num_return_sequences=1)
         generated_text = out[0]["generated_text"]
         
         # We only want the *new* text, so strip the original prompt
-        if generated_text.startswith(req.text):
-            completion = generated_text[len(req.text):]
+        if generated_text.startswith(context):
+            completion = generated_text[len(context):]
         else:
             completion = generated_text
             
         return {"completion": completion.strip()}
     except Exception as e:
+        print(f"Completion error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/formula")
@@ -184,7 +236,10 @@ async def generate_formula(req: FormulaRequest):
     if generator is None:
         return {"formula": ""}
     
-    prompt = f"You are an Excel expert. Translate the following user request into a precise Excel formula. Reply ONLY with the formula. Do not provide explanations.\nRequest: {req.query}\nFormula: ="
+    prompt = f"""You are an Excel formula expert. Convert the user request into an Excel formula.
+Rules: Use English function names (SUM, AVERAGE, IF, VLOOKUP, COUNT, MAX, MIN, ROUND, CONCATENATE, LEFT, RIGHT, MID, LEN, TRIM, COUNTIF, SUMIF, AND, OR, NOT, IFERROR, INDEX, MATCH, ABS, SQRT, POWER, MOD, INT, TODAY, NOW, YEAR, MONTH, DAY). Use cell references like A1, B2. Ranges like A1:B10. Reply ONLY with the formula, nothing else.
+Request: {req.query}
+Formula: ="""
     try:
         out = generator(prompt, max_new_tokens=30, num_return_sequences=1)
         generated_text = out[0]["generated_text"]

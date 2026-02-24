@@ -11,6 +11,7 @@ export interface AISettings {
     baseUrl: string;
     model: string;
     temperature: number;
+    vibeWriting: boolean;
 }
 
 export const DEFAULT_SETTINGS: AISettings = {
@@ -19,6 +20,7 @@ export const DEFAULT_SETTINGS: AISettings = {
     baseUrl: "http://localhost:8080",
     model: "",
     temperature: 0.7,
+    vibeWriting: true,
 };
 
 export const PROVIDER_DEFAULTS: Record<AIProvider, { baseUrl: string; models: string[]; needsApiKey: boolean; label: string }> = {
@@ -135,8 +137,21 @@ export const completionToText = (value: ChatCompletionResponse): string => {
 
 export async function chatCompletion(settings: AISettings, messages: { role: string; content: string }[], tools?: ChatCompletionTools): Promise<ChatCompletionResponse> {
     if (settings.provider === "local") {
-        // Convert messages to single prompt for local models that don't support chat format directly yet
-        const prompt = messages.map(m => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content}`).join("\n\n");
+        // Try the dedicated chat endpoint first, fall back to legacy completion
+        try {
+            const res = await fetchWithTimeout(`${settings.baseUrl}/api/chat`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ messages, max_new_tokens: 1024, temperature: settings.temperature }),
+            });
+            if (res.ok) {
+                const json = await res.json() as OpenAICompletionResponse;
+                return json.choices?.[0]?.message?.content || "";
+            }
+            // Fallback to legacy /api/complete if /api/chat not available
+        } catch { /* fallback */ }
+        
+        const prompt = messages.map(m => `${m.role === 'user' ? 'User' : m.role === 'system' ? 'System' : 'Assistant'}: ${m.content}`).join("\n\n");
         return localCompletion(settings, "", prompt);
     }
     // OpenAI-compatible API (Groq, OpenAI, LMStudio, Jan.AI, Ollama /v1)
@@ -251,7 +266,13 @@ export async function generateFormula(settings: AISettings, query: string): Prom
     const result = completionToText(
         await chatCompletion(
             settings,
-            [{ role: "system", content: "Du bist ein Excel-Formel-Experte. Gib NUR die Formel zurück, ohne Erklärung. Die Formel muss mit = beginnen. Verwende englische Funktionsnamen (SUM, IF, VLOOKUP etc.)." },
+            [{ role: "system", content: `Du bist ein Excel-Formel-Experte. Gib NUR die Formel zurück, ohne Erklärung. Die Formel muss mit = beginnen. 
+Verwende englische Funktionsnamen: SUM, AVERAGE, COUNT, MAX, MIN, IF, VLOOKUP, HLOOKUP, INDEX, MATCH, ROUND, CONCATENATE, LEFT, RIGHT, MID, LEN, TRIM, UPPER, LOWER, TODAY, NOW, YEAR, MONTH, DAY, DATE, ABS, SQRT, POWER, MOD, INT, COUNTIF, SUMIF, AVERAGEIF, AND, OR, NOT, TRUE, FALSE, IFERROR, ISBLANK, ISERROR, ISTEXT, ISNUMBER.
+Verwende Zellreferenzen im Format A1, B2 etc. Bereiche im Format A1:B10.
+Beispiele:
+- "Summe von A1 bis A10" -> =SUM(A1:A10)
+- "Wenn B1 > 100 dann Ja sonst Nein" -> =IF(B1>100,"Ja","Nein")
+- "Durchschnitt der Spalte C" -> =AVERAGE(C1:C100)` },
             { role: "user", content: query }],
         ),
     );
@@ -355,7 +376,7 @@ export async function gridAction(settings: AISettings, context: string, instruct
             type: "function",
             function: {
                 name: "update_values",
-                description: "Hiermit änderst du Inhalte oder schreibst Formeln in einen zusammenhängenden Block von Zellen.",
+                description: "Hiermit änderst du Inhalte oder schreibst Formeln in einen zusammenhängenden Block von Zellen. Formeln beginnen mit = und verwenden englische Funktionsnamen (SUM, AVERAGE, COUNT, MAX, MIN, IF, VLOOKUP, COUNTIF, SUMIF, INDEX, MATCH, ROUND, CONCATENATE, LEFT, RIGHT, MID, LEN, TRIM, ABS, SQRT, AND, OR, NOT, IFERROR).",
                 parameters: {
                     type: "object",
                     properties: {
@@ -365,7 +386,7 @@ export async function gridAction(settings: AISettings, context: string, instruct
                         },
                         values: {
                             type: "array",
-                            description: "Ein 2D Array der Werte. Bsp: [['1','2'],['3','4']]",
+                            description: "Ein 2D Array der Werte. Formeln beginnen mit '='. Bsp: [['Summe','=SUM(A1:A10)'],['Durchschnitt','=AVERAGE(B1:B10)']]",
                             items: {
                                 type: "array",
                                 items: { type: "string" }
@@ -395,9 +416,10 @@ export async function gridAction(settings: AISettings, context: string, instruct
         }
     ];
 
-    const sysPrompt = `Du bist ein hochentwickelter KI-Datenanalyst für eine Tabellenkalkulation. 
+    const sysPrompt = `Du bist ein hochentwickelter KI-Datenanalyst für eine Tabellenkalkulation (wie Excel). 
 Die Tabelle hat Zeilen (1, 2, 3...) und Spalten (A, B, C...).
 Deine Aufgabe: Analysiere den Wunsch des Nutzers und führe EINES oder MEHRERE Tools aus, um die Tabelle anzupassen.
+WICHTIG: Bevorzuge Excel-Formeln (=SUM, =AVERAGE, =IF, =VLOOKUP, =COUNTIF, =SUMIF etc.) statt statischer Werte, wenn der Nutzer Berechnungen, Summen, Durchschnitte oder Analysen anfragt.
 Rechne nicht im Klartext zurück! Gib KEINE Erklärungen. Ruf ZWINGEND eines der definierten Tools auf (oder mehrere hintereinander).`;
 
     const result = await chatCompletion(

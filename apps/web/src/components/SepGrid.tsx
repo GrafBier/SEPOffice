@@ -25,7 +25,6 @@ import {
   AlignRight,
   Sigma,
   SortAsc,
-  Percent,
   Calculator,
   Grid3X3,
   Palette,
@@ -58,6 +57,26 @@ interface CellStyle {
     left?: boolean;
   };
   autoColor?: boolean;
+  numberFormat?: "general" | "number" | "currency" | "percent" | "date" | "thousand";
+  comment?: string; // Cell comment/note
+}
+
+// Merged cell definition
+interface MergedCell {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+}
+
+// Conditional formatting rule
+interface ConditionalRule {
+  id: string;
+  range: string; // e.g. "A1:B10"
+  type: "greaterThan" | "lessThan" | "equals" | "between" | "text" | "duplicate" | "top10";
+  value1?: string | number;
+  value2?: string | number; // for "between"
+  style: Partial<CellStyle>;
 }
 
 interface ParserCellCoord {
@@ -165,6 +184,34 @@ const sanitizeImportedValue = (value: unknown): string => {
   }
 };
 
+/** Format a cell value for display based on its numberFormat. */
+const formatCellValue = (value: string | number, format?: CellStyle["numberFormat"]): string => {
+  if (value === "" || value === undefined || value === null) return "";
+  if (!format || format === "general") return String(value);
+
+  const num = typeof value === "number" ? value : parseFloat(String(value));
+  if (isNaN(num)) return String(value); // Non-numeric → show as-is
+
+  switch (format) {
+    case "number":
+      return num.toLocaleString("de-DE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    case "currency":
+      return num.toLocaleString("de-DE", { style: "currency", currency: "EUR" });
+    case "percent":
+      return (num * 100).toLocaleString("de-DE", { minimumFractionDigits: 1, maximumFractionDigits: 1 }) + " %";
+    case "date": {
+      // Try to interpret as Excel serial date or ISO date
+      const d = new Date(num > 25569 ? (num - 25569) * 86400000 : num);
+      if (!isNaN(d.getTime())) return d.toLocaleDateString("de-DE");
+      return String(value);
+    }
+    case "thousand":
+      return num.toLocaleString("de-DE", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+    default:
+      return String(value);
+  }
+};
+
 interface Sheet {
   id: string;
   name: string;
@@ -175,6 +222,10 @@ interface Sheet {
   colWidths: number[];
   rowHeights: number[];
   images?: { id: string; src: string; x: number; y: number; width: number; height: number; caption?: string }[];
+  mergedCells?: MergedCell[];
+  conditionalRules?: ConditionalRule[];
+  frozenRows?: number; // Number of frozen rows at top
+  frozenCols?: number; // Number of frozen columns at left
 }
 
 export default function SepGrid({ docId }: { docId?: string | null }) {
@@ -294,6 +345,23 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
   const [sheetContextMenu, setSheetContextMenu] = useState<{ x: number; y: number; index: number } | null>(null);
   const gridScrollRef = useRef<HTMLDivElement>(null);
 
+  // Find & Replace state
+  const [findReplaceOpen, setFindReplaceOpen] = useState(false);
+  const [findText, setFindText] = useState("");
+  const [replaceText, setReplaceText] = useState("");
+  const [findResults, setFindResults] = useState<{ r: number; c: number }[]>([]);
+  const [findIndex, setFindIndex] = useState(0);
+
+  // Conditional Formatting Dialog state
+  const [condFormatOpen, setCondFormatOpen] = useState(false);
+  const [condFormatType, setCondFormatType] = useState<ConditionalRule["type"]>("greaterThan");
+  const [condFormatValue1, setCondFormatValue1] = useState("");
+  const [condFormatValue2, setCondFormatValue2] = useState("");
+  const [condFormatColor, setCondFormatColor] = useState("#22c55e");
+  const [condFormatBgColor, setCondFormatBgColor] = useState("#134e2e");
+
+  // Number format state (now in CellStyle.numberFormat, this is kept for backward compat migration only)
+
   // Refs to avoid stale closures in global mousemove
   const isDraggingRef = useRef(false);
   const isDraggingHeaderRef = useRef<"col" | "row" | null>(null);
@@ -404,6 +472,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
   const saveTimeoutRef = useRef<number | null>(null);
   const importFileInputRef = useRef<HTMLInputElement>(null);
   const openFileInputRef = useRef<HTMLInputElement>(null);
+  const csvImportRef = useRef<HTMLInputElement>(null);
 
   // Listen to Ctrl key and Copy/Paste/Navigation
   useEffect(() => {
@@ -417,6 +486,13 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
       if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) {
         e.preventDefault();
         handleRedo();
+        return;
+      }
+
+      // Find & Replace (Ctrl+F / Ctrl+H) – works even when editing
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'f' || e.key === 'h')) {
+        e.preventDefault();
+        setFindReplaceOpen(true);
         return;
       }
 
@@ -435,6 +511,125 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
       }
 
       if (e.key === "Control") setCtrlPressed(true);
+
+      // Ctrl+B / Ctrl+I / Ctrl+U – Formatting shortcuts
+      if ((e.ctrlKey || e.metaKey) && e.key === 'b') {
+        e.preventDefault();
+        applyStyle({ bold: true });
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'i') {
+        e.preventDefault();
+        applyStyle({ italic: true });
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key === 'u') {
+        e.preventDefault();
+        applyStyle({ underline: true });
+        return;
+      }
+
+      // Ctrl+X – Cut
+      if ((e.ctrlKey || e.metaKey) && e.key === 'x' && selection.start && selection.end && !isEditingFormula) {
+        e.preventDefault();
+        const minR = Math.min(selection.start.r, selection.end.r);
+        const maxR = Math.max(selection.start.r, selection.end.r);
+        const minC = Math.min(selection.start.c, selection.end.c);
+        const maxC = Math.max(selection.start.c, selection.end.c);
+
+        const clipData: string[][] = [];
+        for (let r = minR; r <= maxR; r++) {
+          const rowData = [];
+          for (let c = minC; c <= maxC; c++) {
+            rowData.push(data[r]?.[c] || "");
+          }
+          clipData.push(rowData);
+        }
+        setClipboard({ data: clipData, start: { r: minR, c: minC } });
+
+        // Clear original cells
+        const newData = [...data];
+        for (let r = minR; r <= maxR; r++) {
+          newData[r] = [...(newData[r] || [])];
+          for (let c = minC; c <= maxC; c++) {
+            newData[r][c] = "";
+          }
+        }
+        updateCurrentSheet({ data: newData });
+        setSaveStatus(`Cut ${maxR - minR + 1}×${maxC - minC + 1} cells`);
+        return;
+      }
+
+      // Ctrl+V – Paste (internal clipboard, or system clipboard as fallback)
+      if ((e.ctrlKey || e.metaKey) && e.key === 'v' && selection.start && !isEditingFormula) {
+        e.preventDefault();
+        if (clipboard) {
+          // Internal paste
+          const startR = selection.start.r;
+          const startC = selection.start.c;
+          const newData = data.map(row => [...row]);
+          for (let r = 0; r < clipboard.data.length; r++) {
+            for (let c = 0; c < clipboard.data[r].length; c++) {
+              const tR = startR + r;
+              const tC = startC + c;
+              if (tR < rows && tC < cols) {
+                newData[tR][tC] = clipboard.data[r][c];
+              }
+            }
+          }
+          updateCurrentSheet({ data: newData });
+          setSaveStatus(`Pasted ${clipboard.data.length}×${clipboard.data[0]?.length || 0} cells`);
+        } else {
+          // Try system clipboard
+          navigator.clipboard.readText().then(text => {
+            if (!text || !selection.start) return;
+            const pasteRows = text.split('\n').map(line => line.split('\t'));
+            const startR = selection.start.r;
+            const startC = selection.start.c;
+            const newData = data.map(row => [...row]);
+            for (let r = 0; r < pasteRows.length; r++) {
+              for (let c = 0; c < pasteRows[r].length; c++) {
+                const tR = startR + r;
+                const tC = startC + c;
+                if (tR < rows && tC < cols) {
+                  newData[tR][tC] = pasteRows[r][c];
+                }
+              }
+            }
+            updateCurrentSheet({ data: newData });
+            setSaveStatus(`Pasted from clipboard`);
+          }).catch(() => { /* clipboard API not available */ });
+        }
+        return;
+      }
+
+      // F2 – Edit active cell
+      if (e.key === "F2" && selection.start) {
+        e.preventDefault();
+        const inputEl = document.getElementById(`cell-input-${selection.start.r}-${selection.start.c}`);
+        if (inputEl) inputEl.focus();
+        return;
+      }
+
+      // Tab – Move to next cell, Shift+Tab to move left
+      if (e.key === "Tab" && selection.start) {
+        e.preventDefault();
+        const maxCols = (data[0]?.length || 26) - 1;
+        const maxRows = data.length - 1;
+        let { r, c } = selection.start;
+        if (e.shiftKey) {
+          c = c > 0 ? c - 1 : maxCols;
+          if (c === maxCols && r > 0) r--;
+        } else {
+          c = c < maxCols ? c + 1 : 0;
+          if (c === 0 && r < maxRows) r++;
+        }
+        const newSel = { start: { r, c }, end: { r, c } };
+        setSelection(newSel);
+        selectionRef.current = newSel;
+        setFormulaInput(data[r]?.[c] || "");
+        return;
+      }
 
       // Arrow navigation
       if (selection.start && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.key)) {
@@ -512,7 +707,10 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
           clipData.push(rowData);
         }
         setClipboard({ data: clipData, start: { r: minR, c: minC } });
-        setSaveStatus(`Copied ${maxR - minR + 1}x${maxC - minC + 1} cells`);
+        // Also copy to system clipboard as TSV
+        const tsv = clipData.map(row => row.join('\t')).join('\n');
+        navigator.clipboard.writeText(tsv).catch(() => {});
+        setSaveStatus(`Copied ${maxR - minR + 1}×${maxC - minC + 1} cells`);
       }
 
       // Escape key to reset selection & clipboard
@@ -535,7 +733,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [selection, data, isEditingFormula, handleUndo, handleRedo, updateCurrentSheet]);
+  }, [selection, data, isEditingFormula, handleUndo, handleRedo, updateCurrentSheet, clipboard, rows, cols]);
 
   // Global mouseup and mousemove for drag-select
   useEffect(() => {
@@ -831,6 +1029,41 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
     return resultMatrix;
   }, [data, rows, cols, sheets, activeSheetIndex]);
 
+  // Selection statistics for status bar (Sum, Average, Count, Min, Max)
+  const selectionStats = useMemo(() => {
+    if (!selection.start || !selection.end) return null;
+    const minR = Math.min(selection.start.r, selection.end.r);
+    const maxR = Math.max(selection.start.r, selection.end.r);
+    const minC = Math.min(selection.start.c, selection.end.c);
+    const maxC = Math.max(selection.start.c, selection.end.c);
+
+    // Skip if only a single cell
+    if (minR === maxR && minC === maxC) return null;
+
+    const numbers: number[] = [];
+    let count = 0;
+    for (let r = minR; r <= maxR; r++) {
+      for (let c = minC; c <= maxC; c++) {
+        const val = computedData[r]?.[c];
+        if (val !== "" && val !== undefined && val !== null) {
+          count++;
+          const num = typeof val === "number" ? val : parseFloat(String(val));
+          if (!isNaN(num)) numbers.push(num);
+        }
+      }
+    }
+    if (numbers.length === 0) return count > 0 ? { count } : null;
+    const sum = numbers.reduce((a, b) => a + b, 0);
+    return {
+      sum: Math.round(sum * 1e6) / 1e6,
+      average: Math.round((sum / numbers.length) * 1e6) / 1e6,
+      count,
+      min: Math.min(...numbers),
+      max: Math.max(...numbers),
+      numCount: numbers.length,
+    };
+  }, [selection, computedData]);
+
   // Loading Logic
   useEffect(() => {
     const loadContent = async () => {
@@ -889,6 +1122,285 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
     const newData = data.map((row) => [...row, ""]);
     const newWidths = [...colWidths, 100];
     updateCurrentSheet({ cols: cols + 1, data: newData, colWidths: newWidths });
+  };
+
+  // Insert row at current selection position
+  const insertRowAt = () => {
+    const r = selection.start?.r ?? rows;
+    const newRow = Array(cols).fill("");
+    const newData = [...data.slice(0, r), newRow, ...data.slice(r)];
+    const newHeights = [...rowHeights.slice(0, r), 30, ...rowHeights.slice(r)];
+    // Shift cell styles
+    const newStyles: Record<string, CellStyle> = {};
+    for (const [key, value] of Object.entries(cellStyles)) {
+      const [rr, cc] = key.split("-").map(Number);
+      if (rr >= r) {
+        newStyles[`${rr + 1}-${cc}`] = value;
+      } else {
+        newStyles[key] = value;
+      }
+    }
+    updateCurrentSheet({ rows: rows + 1, data: newData, rowHeights: newHeights, cellStyles: newStyles });
+  };
+
+  // Delete row at current selection position
+  const deleteRowAt = () => {
+    if (rows <= 1) return;
+    const r = selection.start?.r ?? rows - 1;
+    const newData = [...data.slice(0, r), ...data.slice(r + 1)];
+    const newHeights = [...rowHeights.slice(0, r), ...rowHeights.slice(r + 1)];
+    // Shift cell styles
+    const newStyles: Record<string, CellStyle> = {};
+    for (const [key, value] of Object.entries(cellStyles)) {
+      const [rr, cc] = key.split("-").map(Number);
+      if (rr === r) continue; // skip deleted row
+      if (rr > r) {
+        newStyles[`${rr - 1}-${cc}`] = value;
+      } else {
+        newStyles[key] = value;
+      }
+    }
+    updateCurrentSheet({ rows: rows - 1, data: newData, rowHeights: newHeights, cellStyles: newStyles });
+  };
+
+  // Insert column at current selection position
+  const insertColAt = () => {
+    const c = selection.start?.c ?? cols;
+    const newData = data.map((row) => [...row.slice(0, c), "", ...row.slice(c)]);
+    const newWidths = [...colWidths.slice(0, c), 100, ...colWidths.slice(c)];
+    // Shift cell styles
+    const newStyles: Record<string, CellStyle> = {};
+    for (const [key, value] of Object.entries(cellStyles)) {
+      const [rr, cc] = key.split("-").map(Number);
+      if (cc >= c) {
+        newStyles[`${rr}-${cc + 1}`] = value;
+      } else {
+        newStyles[key] = value;
+      }
+    }
+    updateCurrentSheet({ cols: cols + 1, data: newData, colWidths: newWidths, cellStyles: newStyles });
+  };
+
+  // Delete column at current selection position
+  const deleteColAt = () => {
+    if (cols <= 1) return;
+    const c = selection.start?.c ?? cols - 1;
+    const newData = data.map((row) => [...row.slice(0, c), ...row.slice(c + 1)]);
+    const newWidths = [...colWidths.slice(0, c), ...colWidths.slice(c + 1)];
+    // Shift cell styles
+    const newStyles: Record<string, CellStyle> = {};
+    for (const [key, value] of Object.entries(cellStyles)) {
+      const [rr, cc] = key.split("-").map(Number);
+      if (cc === c) continue; // skip deleted column
+      if (cc > c) {
+        newStyles[`${rr}-${cc - 1}`] = value;
+      } else {
+        newStyles[key] = value;
+      }
+    }
+    updateCurrentSheet({ cols: cols - 1, data: newData, colWidths: newWidths, cellStyles: newStyles });
+  };
+
+  // === Cell Merging ===
+  const mergeCells = () => {
+    if (!selection.start || !selection.end) return;
+    const minR = Math.min(selection.start.r, selection.end.r);
+    const maxR = Math.max(selection.start.r, selection.end.r);
+    const minC = Math.min(selection.start.c, selection.end.c);
+    const maxC = Math.max(selection.start.c, selection.end.c);
+    
+    // Single cell selected, nothing to merge
+    if (minR === maxR && minC === maxC) return;
+    
+    // Check for existing overlapping merges
+    const existing = currentSheet.mergedCells || [];
+    const overlaps = existing.some(m => 
+      !(maxR < m.startRow || minR > m.endRow || maxC < m.startCol || minC > m.endCol)
+    );
+    if (overlaps) {
+      alert("Überlappende Zusammenführung nicht möglich.");
+      return;
+    }
+    
+    // First cell value becomes the merged cell value
+    const mergedValue = data[minR][minC];
+    const newData = data.map((row, r) => row.map((cell, c) => {
+      if (r >= minR && r <= maxR && c >= minC && c <= maxC) {
+        return (r === minR && c === minC) ? mergedValue : "";
+      }
+      return cell;
+    }));
+    
+    const newMerge: MergedCell = { startRow: minR, startCol: minC, endRow: maxR, endCol: maxC };
+    updateCurrentSheet({ 
+      data: newData, 
+      mergedCells: [...existing, newMerge] 
+    });
+    setSaveStatus("Zellen zusammengeführt");
+  };
+
+  const unmergeCells = () => {
+    if (!selection.start) return;
+    const r = selection.start.r;
+    const c = selection.start.c;
+    const existing = currentSheet.mergedCells || [];
+    const mergeIdx = existing.findIndex(m => 
+      r >= m.startRow && r <= m.endRow && c >= m.startCol && c <= m.endCol
+    );
+    if (mergeIdx === -1) return;
+    
+    const newMerged = [...existing];
+    newMerged.splice(mergeIdx, 1);
+    updateCurrentSheet({ mergedCells: newMerged });
+    setSaveStatus("Zusammenführung aufgehoben");
+  };
+
+  // Check if a cell is part of a merged range (but not the top-left anchor)
+  const isMergedSlave = (r: number, c: number): MergedCell | null => {
+    const merges = currentSheet.mergedCells || [];
+    for (const m of merges) {
+      if (r >= m.startRow && r <= m.endRow && c >= m.startCol && c <= m.endCol) {
+        if (r !== m.startRow || c !== m.startCol) return m;
+      }
+    }
+    return null;
+  };
+
+  // Get merge info for a cell (if it's the anchor)
+  const getMergeInfo = (r: number, c: number): MergedCell | null => {
+    const merges = currentSheet.mergedCells || [];
+    return merges.find(m => m.startRow === r && m.startCol === c) || null;
+  };
+
+  // === Freeze Panes ===
+  const freezePanes = () => {
+    if (!selection.start) return;
+    const { r, c } = selection.start;
+    updateCurrentSheet({ frozenRows: r, frozenCols: c });
+    setSaveStatus(`Fixiert: ${r} Zeile(n), ${c} Spalte(n)`);
+  };
+
+  const unfreezePanes = () => {
+    updateCurrentSheet({ frozenRows: 0, frozenCols: 0 });
+    setSaveStatus("Fixierung aufgehoben");
+  };
+
+  // === Cell Comments ===
+  const addCellComment = () => {
+    if (!selection.start) return;
+    const { r, c } = selection.start;
+    const key = `${r}-${c}`;
+    const current = cellStyles[key] || {};
+    const existingComment = current.comment || "";
+    const newComment = prompt("Kommentar eingeben:", existingComment);
+    if (newComment !== null) {
+      const newStyles = { ...cellStyles, [key]: { ...current, comment: newComment || undefined } };
+      updateCurrentSheet({ cellStyles: newStyles });
+    }
+  };
+
+  // === Add Conditional Formatting Rule ===
+  const addConditionalRule = () => {
+    if (!selection.start || !selection.end) return;
+    const minR = Math.min(selection.start.r, selection.end.r);
+    const maxR = Math.max(selection.start.r, selection.end.r);
+    const minC = Math.min(selection.start.c, selection.end.c);
+    const maxC = Math.max(selection.start.c, selection.end.c);
+    
+    const startCol = String.fromCharCode(65 + minC);
+    const endCol = String.fromCharCode(65 + maxC);
+    const rangeStr = `${startCol}${minR + 1}:${endCol}${maxR + 1}`;
+    
+    const newRule: ConditionalRule = {
+      id: `rule-${Date.now()}`,
+      range: rangeStr,
+      type: condFormatType,
+      value1: condFormatValue1,
+      value2: condFormatValue2,
+      style: {
+        color: condFormatColor,
+        bgColor: condFormatBgColor
+      }
+    };
+    
+    const existingRules = currentSheet.conditionalRules || [];
+    updateCurrentSheet({ conditionalRules: [...existingRules, newRule] });
+    setCondFormatOpen(false);
+    setSaveStatus("Bedingte Formatierung hinzugefügt");
+  };
+
+  // === Remove all Conditional Formatting in selection ===
+  const clearConditionalFormatting = () => {
+    if (!selection.start) return;
+    const minR = Math.min(selection.start.r, selection.end?.r || selection.start.r);
+    const maxR = Math.max(selection.start.r, selection.end?.r || selection.start.r);
+    const minC = Math.min(selection.start.c, selection.end?.c || selection.start.c);
+    const maxC = Math.max(selection.start.c, selection.end?.c || selection.start.c);
+    
+    const existingRules = currentSheet.conditionalRules || [];
+    // Filter out rules that overlap with the selection
+    const newRules = existingRules.filter(rule => {
+      const rangeMatch = rule.range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+      if (!rangeMatch) return true;
+      const ruleStartCol = rangeMatch[1].toUpperCase().charCodeAt(0) - 65;
+      const ruleStartRow = parseInt(rangeMatch[2], 10) - 1;
+      const ruleEndCol = rangeMatch[3].toUpperCase().charCodeAt(0) - 65;
+      const ruleEndRow = parseInt(rangeMatch[4], 10) - 1;
+      // Keep if no overlap
+      return maxR < ruleStartRow || minR > ruleEndRow || maxC < ruleStartCol || minC > ruleEndCol;
+    });
+    updateCurrentSheet({ conditionalRules: newRules });
+    setSaveStatus("Bedingte Formatierung entfernt");
+  };
+
+  // === Conditional Formatting Helper ===
+  const applyConditionalFormatting = (r: number, c: number, value: string | number, baseStyle: CellStyle): CellStyle => {
+    const rules = currentSheet.conditionalRules || [];
+    let resultStyle = { ...baseStyle };
+    
+    for (const rule of rules) {
+      // Parse range (simple A1:B10 format)
+      const rangeMatch = rule.range.match(/([A-Z]+)(\d+):([A-Z]+)(\d+)/i);
+      if (!rangeMatch) continue;
+      
+      const startCol = rangeMatch[1].toUpperCase().charCodeAt(0) - 65;
+      const startRow = parseInt(rangeMatch[2], 10) - 1;
+      const endCol = rangeMatch[3].toUpperCase().charCodeAt(0) - 65;
+      const endRow = parseInt(rangeMatch[4], 10) - 1;
+      
+      // Check if cell is in range
+      if (r < startRow || r > endRow || c < startCol || c > endCol) continue;
+      
+      const numVal = typeof value === "number" ? value : parseFloat(String(value));
+      const strVal = String(value).toLowerCase();
+      let matches = false;
+      
+      switch (rule.type) {
+        case "greaterThan":
+          matches = !isNaN(numVal) && numVal > Number(rule.value1);
+          break;
+        case "lessThan":
+          matches = !isNaN(numVal) && numVal < Number(rule.value1);
+          break;
+        case "equals":
+          matches = strVal === String(rule.value1).toLowerCase() || numVal === Number(rule.value1);
+          break;
+        case "between":
+          matches = !isNaN(numVal) && numVal >= Number(rule.value1) && numVal <= Number(rule.value2);
+          break;
+        case "text":
+          matches = strVal.includes(String(rule.value1).toLowerCase());
+          break;
+        default:
+          break;
+      }
+      
+      if (matches) {
+        resultStyle = { ...resultStyle, ...rule.style };
+      }
+    }
+    
+    return resultStyle;
   };
 
   const handleNewGrid = () => {
@@ -1012,6 +1524,87 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
     }
   };
 
+  // CSV Export
+  const handleExportCSV = () => {
+    const csvRows: string[] = [];
+    for (let r = 0; r < rows; r++) {
+      if (!data[r].some(c => c !== "")) continue; // skip empty rows
+      const rowValues = [];
+      for (let c = 0; c < cols; c++) {
+        let val = String(computedData[r]?.[c] ?? data[r][c] ?? "");
+        // Escape values containing commas, quotes, or newlines
+        if (val.includes('"') || val.includes(';') || val.includes('\n')) {
+          val = '"' + val.replace(/"/g, '""') + '"';
+        }
+        rowValues.push(val);
+      }
+      csvRows.push(rowValues.join(";"));
+    }
+    const csvContent = csvRows.join("\n");
+    const blob = new Blob(["\uFEFF" + csvContent], { type: "text/csv;charset=utf-8" });
+    const url = window.URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${docName || "SEPGrid_Export"}.csv`;
+    a.click();
+    window.URL.revokeObjectURL(url);
+    setSaveStatus("CSV exportiert");
+  };
+
+  // CSV Import
+  const handleImportCSV = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target?.result as string;
+      if (!text) return;
+      // Try semicolon first, then comma, then tab
+      let separator = ";";
+      const firstLine = text.split("\n")[0] || "";
+      if (firstLine.includes("\t") && !firstLine.includes(";")) separator = "\t";
+      else if (firstLine.includes(",") && !firstLine.includes(";")) separator = ",";
+      
+      const lines = text.split("\n").filter(l => l.trim() !== "");
+      const parsedData: string[][] = lines.map(line => {
+        // Basic CSV parsing with quote handling
+        const result: string[] = [];
+        let current = "";
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (ch === '"') {
+            if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
+            else inQuotes = !inQuotes;
+          } else if (ch === separator && !inQuotes) {
+            result.push(current.trim());
+            current = "";
+          } else {
+            current += ch;
+          }
+        }
+        result.push(current.trim());
+        return result;
+      });
+
+      const maxCols = Math.max(cols, ...parsedData.map(r => r.length));
+      const maxRows = Math.max(rows, parsedData.length);
+      const newData = Array.from({ length: maxRows }, (_, r) =>
+        Array.from({ length: maxCols }, (_, c) => parsedData[r]?.[c] ?? "")
+      );
+      updateCurrentSheet({
+        rows: maxRows,
+        cols: maxCols,
+        data: newData,
+        colWidths: Array(maxCols).fill(100),
+        rowHeights: Array(maxRows).fill(30),
+      });
+      setSaveStatus(`CSV importiert: ${parsedData.length} Zeilen`);
+    };
+    reader.readAsText(file, "utf-8");
+    e.target.value = ""; // Reset file input
+  };
+
   const handleSaveAs = () => {
     const jsonStr = JSON.stringify({ workbook: sheets });
     const blob = new Blob([jsonStr], { type: "application/json" });
@@ -1046,6 +1639,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
         if (style.color !== undefined) updatedStyle.color = style.color;
         if (style.bgColor !== undefined) updatedStyle.bgColor = style.bgColor;
         if (style.autoColor !== undefined) updatedStyle.autoColor = !current.autoColor;
+        if (style.numberFormat !== undefined) updatedStyle.numberFormat = style.numberFormat;
 
         if (style.borders !== undefined) {
           updatedStyle.borders = { ...(current.borders || {}), ...style.borders };
@@ -1353,7 +1947,20 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
             for (let r = range.start.r; r <= range.end.r; r++) {
               for (let c = range.start.c; c <= range.end.c; c++) {
                 const styleKey = `${r}-${c}`;
-                nextStyles[styleKey] = { ...nextStyles[styleKey], ...args.style };
+                const mergedStyle = { ...nextStyles[styleKey], ...args.style };
+                // Auto-set contrasting text color when bgColor is set but no text color given
+                if (args.style.bgColor && !args.style.color) {
+                  const bg = args.style.bgColor;
+                  if (bg && bg.startsWith('#') && bg.length >= 7) {
+                    const hex = bg.replace('#', '');
+                    const rr = parseInt(hex.substring(0, 2), 16);
+                    const gg = parseInt(hex.substring(2, 4), 16);
+                    const bb = parseInt(hex.substring(4, 6), 16);
+                    const luminance = (0.299 * rr + 0.587 * gg + 0.114 * bb) / 255;
+                    mergedStyle.color = luminance > 0.5 ? '#0f172a' : '#f8fafc';
+                  }
+                }
+                nextStyles[styleKey] = mergedStyle;
               }
             }
             changed = true;
@@ -1401,6 +2008,79 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
       setAiGenerateOpen(false);
       setAiGeneratePrompt("");
     }
+  };
+
+  // === Find & Replace ===
+  const handleFind = (searchText: string) => {
+    if (!searchText) { setFindResults([]); setFindIndex(0); return; }
+    const results: { r: number; c: number }[] = [];
+    const lower = searchText.toLowerCase();
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const val = String(data[r]?.[c] || "").toLowerCase();
+        const computed = String(computedData[r]?.[c] || "").toLowerCase();
+        if (val.includes(lower) || computed.includes(lower)) {
+          results.push({ r, c });
+        }
+      }
+    }
+    setFindResults(results);
+    setFindIndex(0);
+    if (results.length > 0) {
+      const { r, c } = results[0];
+      const newSel = { start: { r, c }, end: { r, c } };
+      setSelection(newSel);
+      selectionRef.current = newSel;
+      document.getElementById(`cell-${r}-${c}`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+    }
+  };
+
+  const handleFindNext = () => {
+    if (findResults.length === 0) return;
+    const nextIdx = (findIndex + 1) % findResults.length;
+    setFindIndex(nextIdx);
+    const { r, c } = findResults[nextIdx];
+    const newSel = { start: { r, c }, end: { r, c } };
+    setSelection(newSel);
+    selectionRef.current = newSel;
+    document.getElementById(`cell-${r}-${c}`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
+
+  const handleFindPrev = () => {
+    if (findResults.length === 0) return;
+    const prevIdx = (findIndex - 1 + findResults.length) % findResults.length;
+    setFindIndex(prevIdx);
+    const { r, c } = findResults[prevIdx];
+    const newSel = { start: { r, c }, end: { r, c } };
+    setSelection(newSel);
+    selectionRef.current = newSel;
+    document.getElementById(`cell-${r}-${c}`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  };
+
+  const handleReplace = () => {
+    if (findResults.length === 0 || !findText) return;
+    const { r, c } = findResults[findIndex];
+    const newData = data.map(row => [...row]);
+    newData[r][c] = String(newData[r][c]).replace(new RegExp(findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), replaceText);
+    updateCurrentSheet({ data: newData });
+    handleFind(findText); // re-search
+  };
+
+  const handleReplaceAll = () => {
+    if (findResults.length === 0 || !findText) return;
+    const escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'gi');
+    const newData = data.map(row => [...row]);
+    let count = 0;
+    for (const { r, c } of findResults) {
+      const oldVal = String(newData[r][c]);
+      const newVal = oldVal.replace(regex, replaceText);
+      if (newVal !== oldVal) { newData[r][c] = newVal; count++; }
+    }
+    updateCurrentSheet({ data: newData });
+    setFindResults([]);
+    setFindIndex(0);
+    setSaveStatus(`${count} Ersetzungen durchgeführt`);
   };
 
   // === CSV Generation for RAG Context ===
@@ -1717,6 +2397,30 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                 >
                   <Download size={14} /> Exportieren (.xlsx)
                 </button>
+                <div className="dropdown-divider"></div>
+                <button
+                  onClick={() => {
+                    csvImportRef.current?.click();
+                    setActiveMenu(null);
+                  }}
+                >
+                  <Upload size={14} /> CSV importieren
+                </button>
+                <input
+                  type="file"
+                  accept=".csv,.tsv,.txt"
+                  ref={csvImportRef}
+                  onChange={handleImportCSV}
+                  style={{ display: "none" }}
+                />
+                <button
+                  onClick={() => {
+                    handleExportCSV();
+                    setActiveMenu(null);
+                  }}
+                >
+                  <Download size={14} /> CSV exportieren
+                </button>
               </div>
             )}
           </div>
@@ -1842,15 +2546,35 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
         <div className="ribbon-divider" />
 
         <div className="ribbon-group">
-          <button className="ribbon-btn" title="Prozent" onClick={() => {
-            if (selection.start) {
-              const { r, c } = selection.start;
-              const val = data[r][c];
-              if (!isNaN(Number(val)) && val !== "") {
-                handleCellChange(r, c, (Number(val) / 100).toString());
-              }
-            }
-          }}><Percent size={16} /></button>
+          {/* Number Format Dropdown */}
+          <div style={{ position: "relative" }}>
+            <button className="ribbon-btn" title="Zahlenformat" onClick={(e) => { e.stopPropagation(); setActiveMenu(activeMenu === "numfmt" ? null : "numfmt"); }}
+              style={{ fontSize: "0.75rem", minWidth: "32px" }}>
+              123
+            </button>
+            {activeMenu === "numfmt" && (
+              <div className="dropdown-menu" style={{ minWidth: "180px" }}>
+                <button onClick={() => { applyStyle({ numberFormat: "general" }); setActiveMenu(null); }}>
+                  Standard
+                </button>
+                <button onClick={() => { applyStyle({ numberFormat: "number" }); setActiveMenu(null); }}>
+                  Zahl (1.234,56)
+                </button>
+                <button onClick={() => { applyStyle({ numberFormat: "currency" }); setActiveMenu(null); }}>
+                  💶 Währung (€)
+                </button>
+                <button onClick={() => { applyStyle({ numberFormat: "percent" }); setActiveMenu(null); }}>
+                  % Prozent
+                </button>
+                <button onClick={() => { applyStyle({ numberFormat: "thousand" }); setActiveMenu(null); }}>
+                  1.000 Tausender
+                </button>
+                <button onClick={() => { applyStyle({ numberFormat: "date" }); setActiveMenu(null); }}>
+                  📅 Datum
+                </button>
+              </div>
+            )}
+          </div>
           <button className="ribbon-btn" title="Summe (Σ)" onClick={() => {
             // Simple AutoSum logic: Sum column above
             if (selection.start) {
@@ -1892,6 +2616,32 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
               >
                 Transponiert Einfügen (Spalten zu Zeilen)
               </button>
+              <div className="dropdown-divider"></div>
+              <button
+                onClick={() => {
+                  setFindReplaceOpen(true);
+                  setActiveMenu(null);
+                }}
+              >
+                🔍 Suchen & Ersetzen (Strg+F)
+              </button>
+              <div className="dropdown-divider"></div>
+              <button
+                onClick={() => {
+                  setCondFormatOpen(true);
+                  setActiveMenu(null);
+                }}
+              >
+                🎨 Bedingte Formatierung...
+              </button>
+              <button
+                onClick={() => {
+                  clearConditionalFormatting();
+                  setActiveMenu(null);
+                }}
+              >
+                ❌ Bedingte Formatierung entfernen
+              </button>
             </div>
           )}
         </div>
@@ -1911,6 +2661,42 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
           </button>
           {activeMenu === "insert" && (
             <div className="dropdown-menu">
+              <button
+                onClick={() => {
+                  insertRowAt();
+                  setActiveMenu(null);
+                }}
+              >
+                ↕ Zeile einfügen (oberhalb)
+              </button>
+              <button
+                onClick={() => {
+                  insertColAt();
+                  setActiveMenu(null);
+                }}
+              >
+                ↔ Spalte einfügen (links)
+              </button>
+              <div className="dropdown-divider"></div>
+              <button
+                onClick={() => {
+                  deleteRowAt();
+                  setActiveMenu(null);
+                }}
+                style={{ color: "#ef4444" }}
+              >
+                ✕ Zeile löschen
+              </button>
+              <button
+                onClick={() => {
+                  deleteColAt();
+                  setActiveMenu(null);
+                }}
+                style={{ color: "#ef4444" }}
+              >
+                ✕ Spalte löschen
+              </button>
+              <div className="dropdown-divider"></div>
               <button
                 onClick={() => {
                   addRow();
@@ -1935,6 +2721,33 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                 }}
               >
                 <Sparkles size={14} color="#38bdf8" /> KI: Tabelle erstellen...
+              </button>
+              <div className="dropdown-divider"></div>
+              <button
+                onClick={() => {
+                  mergeCells();
+                  setActiveMenu(null);
+                }}
+                disabled={!selection.start || !selection.end || (selection.start.r === selection.end.r && selection.start.c === selection.end.c)}
+              >
+                ⊞ Zellen zusammenführen
+              </button>
+              <button
+                onClick={() => {
+                  unmergeCells();
+                  setActiveMenu(null);
+                }}
+              >
+                ⊟ Zusammenführung aufheben
+              </button>
+              <div className="dropdown-divider"></div>
+              <button
+                onClick={() => {
+                  addCellComment();
+                  setActiveMenu(null);
+                }}
+              >
+                💬 Kommentar hinzufügen
               </button>
             </div>
           )}
@@ -2012,6 +2825,29 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
               >
                 {showChart ? "✓ Chart anzeigen" : "Chart anzeigen"}
               </button>
+              <div className="dropdown-divider"></div>
+              <button
+                onClick={() => {
+                  freezePanes();
+                  setActiveMenu(null);
+                }}
+              >
+                ❄️ Fenster fixieren
+              </button>
+              <button
+                onClick={() => {
+                  unfreezePanes();
+                  setActiveMenu(null);
+                }}
+                disabled={!currentSheet.frozenRows && !currentSheet.frozenCols}
+              >
+                Fixierung aufheben
+              </button>
+              {(currentSheet.frozenRows || currentSheet.frozenCols) && (
+                <span style={{ padding: "0.3rem 0.8rem", fontSize: "0.75rem", color: "#64748b" }}>
+                  Fixiert: {currentSheet.frozenRows || 0} Zeilen, {currentSheet.frozenCols || 0} Spalten
+                </span>
+              )}
             </div>
           )}
         </div>
@@ -2024,13 +2860,25 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
 
       {/* Formula Bar */}
       <div className="formula-bar">
-        <div className="cell-address">
+        <div className="cell-address" title="Aktive Zelle / Ausgewählter Bereich">
           {selection.start && selection.end
              // If start != end, show range A1:B2, else just A1
             ? (selection.start.r !== selection.end.r || selection.start.c !== selection.end.c)
                 ? `${String.fromCharCode(65 + Math.min(selection.start.c, selection.end.c))}${Math.min(selection.start.r, selection.end.r) + 1}:${String.fromCharCode(65 + Math.max(selection.start.c, selection.end.c))}${Math.max(selection.start.r, selection.end.r) + 1}`
                 : `${String.fromCharCode(65 + selection.start.c)}${selection.start.r + 1}`
             : ""}
+        </div>
+        {/* fx Symbol wie in Excel */}
+        <div className="formula-icon" style={{ 
+          fontWeight: "bold", 
+          fontStyle: "italic", 
+          color: "#64748b",
+          fontSize: "0.9rem",
+          padding: "0 0.3rem",
+          borderRight: "1px solid var(--glass-border)",
+          marginRight: "0.3rem"
+        }}>
+          <span title="Formel">fx</span>
         </div>
         <div className="formula-icon" style={{ position: "relative" }}>
           <button
@@ -2101,8 +2949,63 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
               handleCellChange(selection.start.r, selection.start.c, e.target.value);
             }
           }}
-          placeholder="Formel oder Wert eingeben..."
+          onKeyDown={(e) => {
+            // Enter = Confirm and move down
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              if (selection.start) {
+                const newR = Math.min(selection.start.r + 1, rows - 1);
+                const newSel = { start: { r: newR, c: selection.start.c }, end: { r: newR, c: selection.start.c } };
+                setSelection(newSel);
+                selectionRef.current = newSel;
+                setFormulaInput(data[newR]?.[selection.start.c] || "");
+              }
+            }
+            // Tab = Confirm and move right
+            if (e.key === "Tab") {
+              e.preventDefault();
+              if (selection.start) {
+                const newC = Math.min(selection.start.c + 1, cols - 1);
+                const newSel = { start: { r: selection.start.r, c: newC }, end: { r: selection.start.r, c: newC } };
+                setSelection(newSel);
+                selectionRef.current = newSel;
+                setFormulaInput(data[selection.start.r]?.[newC] || "");
+              }
+            }
+            // Escape = Cancel editing, revert to original value
+            if (e.key === "Escape") {
+              if (selection.start) {
+                const original = data[selection.start.r]?.[selection.start.c] || "";
+                setFormulaInput(original);
+              }
+              (e.target as HTMLInputElement).blur();
+            }
+          }}
+          placeholder="Formel oder Wert eingeben... (= für Formel, z.B. =SUM(A1:A10))"
+          style={{
+            borderColor: (selection.start && computedData[selection.start.r]?.[selection.start.c]?.toString().startsWith("#"))
+              ? "#ef4444" 
+              : undefined,
+            boxShadow: (selection.start && computedData[selection.start.r]?.[selection.start.c]?.toString().startsWith("#"))
+              ? "0 0 0 2px rgba(239,68,68,0.3)"
+              : undefined
+          }}
         />
+        {/* Error indicator */}
+        {selection.start && computedData[selection.start.r]?.[selection.start.c]?.toString().startsWith("#") && (
+          <div style={{ 
+            color: "#ef4444", 
+            fontSize: "0.75rem", 
+            display: "flex", 
+            alignItems: "center", 
+            gap: "0.25rem",
+            padding: "0 0.5rem",
+            background: "rgba(239,68,68,0.1)",
+            borderRadius: "4px"
+          }}>
+            ⚠️ {computedData[selection.start.r]?.[selection.start.c]}
+          </div>
+        )}
       </div>
 
       {
@@ -2224,8 +3127,8 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
         {/* Fixed-width inner container */}
         <div style={{ width: `${40 + colWidths.reduce((a, b) => a + b, 0)}px`, display: "flex", flexDirection: "column", height: "100%" }}>
           {/* Column Headers */}
-          <div style={{ display: "flex", flexShrink: 0, background: "#0f172a" }}>
-            <div className="row-header" style={{ width: "40px", minWidth: "40px", height: "28px", borderRight: "1px solid rgba(255,255,255,0.1)", borderBottom: "1px solid rgba(255,255,255,0.1)", background: "#0f172a" }} />
+          <div style={{ display: "flex", flexShrink: 0, background: "var(--grid-row-header-bg)" }}>
+            <div className="row-header" style={{ width: "40px", minWidth: "40px", height: "28px", borderRight: "1px solid var(--grid-border)", borderBottom: "1px solid var(--grid-border)", background: "var(--grid-row-header-bg)" }} />
             {Array.from({ length: cols }).map((_, i) => (
               <div
                 key={i}
@@ -2247,10 +3150,10 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
-                  background: "rgba(30, 41, 59, 0.8)",
-                  borderRight: "1px solid rgba(255,255,255,0.1)",
-                  borderBottom: "1px solid rgba(255,255,255,0.1)",
-                  color: "#94a3b8",
+                  background: "var(--grid-header-bg)",
+                  borderRight: "1px solid var(--grid-border)",
+                  borderBottom: "1px solid var(--grid-border)",
+                  color: "var(--grid-header-text)",
                   fontSize: "0.75rem",
                   fontWeight: "600",
                   cursor: "s-resize",
@@ -2313,13 +3216,13 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                     width: "40px",
                     minWidth: "40px",
                     height: "30px",
-                    background: "#0f172a",
-                    borderRight: "1px solid #1e293b",
-                    borderBottom: "1px solid #1e293b",
+                    background: "var(--grid-row-header-bg)",
+                    borderRight: "1px solid var(--grid-row-header-border)",
+                    borderBottom: "1px solid var(--grid-row-header-border)",
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
-                    color: "#94a3b8",
+                    color: "var(--grid-header-text)",
                     fontSize: "0.75rem",
                     zIndex: 2,
                     cursor: "e-resize",
@@ -2342,6 +3245,25 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                   />
                 </div>
                 {(data[rIndex] || []).map((cell, cIndex) => {
+                  // Check if this cell is a slave in a merged region (hidden)
+                  const mergedSlave = isMergedSlave(rIndex, cIndex);
+                  if (mergedSlave) {
+                    // Don't render slave cells at all
+                    return null;
+                  }
+                  
+                  // Check if this cell is a merge anchor
+                  const mergeInfo = getMergeInfo(rIndex, cIndex);
+                  const mergeColSpan = mergeInfo ? (mergeInfo.endCol - mergeInfo.startCol + 1) : 1;
+                  const mergeRowSpan = mergeInfo ? (mergeInfo.endRow - mergeInfo.startRow + 1) : 1;
+                  const mergedWidth = mergeInfo 
+                    ? colWidths.slice(cIndex, cIndex + mergeColSpan).reduce((a, b) => a + b, 0) 
+                    : colWidths[cIndex];
+                  const baseRowHeight = rowHeights[rIndex] || 30;
+                  const mergedHeight = mergeInfo
+                    ? rowHeights.slice(rIndex, rIndex + mergeRowSpan).reduce((a, b) => a + b, 0)
+                    : baseRowHeight;
+                  
                   const isSelected =
                     selection.start &&
                     selection.end &&
@@ -2353,7 +3275,12 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                   const isActive = selection.start?.r === rIndex && selection.start?.c === cIndex;
 
                   const computedVal = computedData[rIndex]?.[cIndex];
-                  const displayValue = isActive ? cell : computedVal;
+                  let cellStyle = cellStyles[`${rIndex}-${cIndex}`] || {};
+                  
+                  // Apply conditional formatting
+                  cellStyle = applyConditionalFormatting(rIndex, cIndex, computedVal, cellStyle);
+                  
+                  const displayValue = isActive ? cell : formatCellValue(computedVal, cellStyle.numberFormat);
 
                   let isInFillRange = false;
                   if (isFilling && selection.end && fillEnd) {
@@ -2364,13 +3291,13 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                     isInFillRange = rIndex >= fr && rIndex <= tr && cIndex >= fc && cIndex <= tc;
                   }
 
-                  const cellStyle = cellStyles[`${rIndex}-${cIndex}`] || {};
                   const isError = displayValue === "#ERROR" || (typeof displayValue === "string" && displayValue.startsWith("#"));
+                  const hasComment = !!cellStyle.comment;
 
-                  let textColor = cellStyle.color || "#f8fafc";
+                  let textColor = cellStyle.color || "var(--grid-cell-text)";
                   if (cellStyle.autoColor) {
-                    const numVal = Number(displayValue);
-                    if (!isNaN(numVal) && displayValue !== "") {
+                    const numVal = typeof computedVal === "number" ? computedVal : Number(computedVal);
+                    if (!isNaN(numVal) && computedVal !== "") {
                       if (numVal > 0) textColor = "#22c55e";
                       else if (numVal < 0) textColor = "#ef4444";
                       else textColor = "#f8fafc";
@@ -2386,10 +3313,11 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                       data-row={rIndex}
                       data-col={cIndex}
                       className={`grid-cell ${isSelected ? "selected" : ""} ${isActive ? "active" : ""} ${isInFillRange ? "in-fill-range" : ""}`}
+                      title={hasComment ? cellStyle.comment : undefined}
                       style={{
-                        width: colWidths[cIndex],
-                        minWidth: colWidths[cIndex],
-                        height: "30px",
+                        width: mergedWidth,
+                        minWidth: mergedWidth,
+                        height: mergedHeight,
                         textAlign: cellStyle.align || "left",
                         fontWeight: cellStyle.bold ? "bold" : "normal",
                         fontStyle: cellStyle.italic ? "italic" : "normal",
@@ -2397,13 +3325,14 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                         backgroundColor: cellStyle.bgColor || "transparent",
                         borderTop: cellStyle.borders?.top ? "1px solid #94a3b8" : "none",
                         borderLeft: cellStyle.borders?.left ? "1px solid #94a3b8" : "none",
-                        borderRight: cellStyle.borders?.right ? "1px solid #94a3b8" : "1px solid rgba(255,255,255,0.1)",
-                        borderBottom: cellStyle.borders?.bottom ? "1px solid #94a3b8" : "1px solid rgba(255,255,255,0.1)",
+                        borderRight: cellStyle.borders?.right ? "1px solid #94a3b8" : "1px solid var(--grid-border)",
+                        borderBottom: cellStyle.borders?.bottom ? "1px solid #94a3b8" : "1px solid var(--grid-border)",
                         display: "flex",
                         alignItems: "center",
                         fontSize: "0.85rem",
                         position: "relative",
-                        userSelect: "none"
+                        userSelect: "none",
+                        zIndex: mergeInfo ? 1 : "auto", // Merged cells on top
                       }}
                       onMouseDown={(e) => {
                         // Prevent default to stop text selection cursor issues
@@ -2418,20 +3347,56 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                           return;
                         }
 
-                        if (isEditingFormula && formulaInput.endsWith("=")) {
+                        // Check if we're editing a formula and should insert a cell reference
+                        // This works after =, (, +, -, *, /, ,, !, or at end of sheet reference like "Tabelle2!"
+                        const shouldInsertRef = isEditingFormula && formulaInput.startsWith("=") && 
+                          /[=(\+\-\*\/,!]$/.test(formulaInput);
+                        
+                        if (shouldInsertRef) {
                           setFormulaDragStart({ r: rIndex, c: cIndex });
                           setFormulaDragging(true);
-                          const startCol = String.fromCharCode(65 + cIndex);
-                          const startRow = rIndex + 1;
-                          const newFormulaInput = formulaInput + `${startCol}${startRow}`;
+                          const colLetter = String.fromCharCode(65 + cIndex);
+                          const rowNum = rIndex + 1;
+                          
+                          // If we're on a different sheet and the formula doesn't already have the sheet prefix
+                          let cellRef = `${colLetter}${rowNum}`;
+                          if (formulaOriginSheet && formulaOriginSheet.sheetIndex !== activeSheetIndex) {
+                            const currentSheetName = sheets[activeSheetIndex]?.name || "";
+                            // Only add sheet prefix if it's not already there
+                            if (!formulaInput.endsWith(currentSheetName + "!")) {
+                              cellRef = `${currentSheetName}!${colLetter}${rowNum}`;
+                            }
+                          }
+                          
+                          const newFormulaInput = formulaInput + cellRef;
                           setFormulaInput(newFormulaInput);
-                          if (selection.start) {
+                          if (formulaOriginSheet) {
+                            // Update the formula in the original cell
+                            const origSheet = sheets[formulaOriginSheet.sheetIndex];
+                            if (origSheet) {
+                              const newData = origSheet.data.map((row, ri) => 
+                                row.map((cell, ci) => 
+                                  ri === formulaOriginSheet.r && ci === formulaOriginSheet.c ? newFormulaInput : cell
+                                )
+                              );
+                              setSheets(prev => prev.map((s, i) => i === formulaOriginSheet.sheetIndex ? { ...s, data: newData } : s));
+                            }
+                          } else if (selection.start) {
                             handleCellChange(selection.start.r, selection.start.c, newFormulaInput);
                           }
                           return;
                         }
 
                         // Normal cell click & drag start
+                        // If we were editing a formula on another sheet, go back
+                        if (formulaOriginSheet && formulaOriginSheet.sheetIndex !== activeSheetIndex) {
+                          setActiveSheetIndex(formulaOriginSheet.sheetIndex);
+                          setFormulaOriginSheet(null);
+                          setIsEditingFormula(false);
+                          return;
+                        }
+                        
+                        setFormulaOriginSheet(null);
                         setIsDragging(true);
                         isDraggingRef.current = true;
                         isDraggingHeaderRef.current = null;
@@ -2503,6 +3468,21 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                           paddingLeft: "4px"
                         }}
                       />
+                      {/* Comment indicator */}
+                      {hasComment && (
+                        <div
+                          style={{
+                            position: "absolute",
+                            top: 0,
+                            right: 0,
+                            width: 0,
+                            height: 0,
+                            borderLeft: "6px solid transparent",
+                            borderTop: "6px solid #ef4444",
+                            pointerEvents: "none"
+                          }}
+                        />
+                      )}
                       {isActive && !isDragging && (
                         <div
                           className="fill-handle"
@@ -2560,6 +3540,20 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
           </button>
         ))}
         <button onClick={addSheet} style={{ background: "transparent", border: "none", color: "#64748b", cursor: "pointer", fontSize: "1.2rem", padding: "0 0.5rem" }}>+</button>
+        
+        {/* Status Bar – Selection Stats */}
+        <div style={{ marginLeft: "auto", display: "flex", gap: "1rem", alignItems: "center", fontSize: "0.8rem", color: "#94a3b8" }}>
+          {selectionStats && (
+            <>
+              {selectionStats.sum !== undefined && <span>Σ Summe: <strong style={{ color: "var(--primary-color)" }}>{selectionStats.sum.toLocaleString("de-DE")}</strong></span>}
+              {selectionStats.average !== undefined && <span>⌀ Durchschnitt: <strong style={{ color: "var(--primary-color)" }}>{selectionStats.average.toLocaleString("de-DE")}</strong></span>}
+              {selectionStats.min !== undefined && <span>↓ Min: <strong>{selectionStats.min.toLocaleString("de-DE")}</strong></span>}
+              {selectionStats.max !== undefined && <span>↑ Max: <strong>{selectionStats.max.toLocaleString("de-DE")}</strong></span>}
+              <span>Anzahl: <strong>{selectionStats.count}</strong></span>
+            </>
+          )}
+          <span style={{ color: "#475569" }}>{saveStatus}</span>
+        </div>
       </div>
 
       {/* Sheet Tab Context Menu */}
@@ -2577,6 +3571,132 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
         )
       }
 
+      {/* Find & Replace Dialog */}
+      {findReplaceOpen && (
+        <div style={{
+          position: "fixed", top: "80px", right: "20px", zIndex: 2000,
+          background: "var(--glass-bg)", backdropFilter: "blur(20px)",
+          border: "1px solid var(--glass-border)", borderRadius: "12px",
+          padding: "1rem", minWidth: "340px", boxShadow: "0 25px 50px -12px rgba(0,0,0,0.5)"
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+            <span style={{ fontWeight: 600, fontSize: "0.9rem" }}>🔍 Suchen & Ersetzen</span>
+            <button onClick={() => { setFindReplaceOpen(false); setFindResults([]); }} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "1.2rem" }}>✕</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+              <input
+                autoFocus
+                type="text"
+                placeholder="Suchen..."
+                value={findText}
+                onChange={(e) => { setFindText(e.target.value); handleFind(e.target.value); }}
+                onKeyDown={(e) => { if (e.key === "Enter") { e.shiftKey ? handleFindPrev() : handleFindNext(); } if (e.key === "Escape") { setFindReplaceOpen(false); setFindResults([]); } }}
+                style={{ flex: 1, padding: "0.5rem", borderRadius: "6px", border: "1px solid var(--glass-border)", background: "rgba(15,23,42,0.5)", color: "inherit", fontSize: "0.85rem" }}
+              />
+              <span style={{ fontSize: "0.75rem", color: "#64748b", whiteSpace: "nowrap" }}>
+                {findResults.length > 0 ? `${findIndex + 1}/${findResults.length}` : "0/0"}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", alignItems: "center" }}>
+              <input
+                type="text"
+                placeholder="Ersetzen mit..."
+                value={replaceText}
+                onChange={(e) => setReplaceText(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") handleReplace(); if (e.key === "Escape") { setFindReplaceOpen(false); setFindResults([]); } }}
+                style={{ flex: 1, padding: "0.5rem", borderRadius: "6px", border: "1px solid var(--glass-border)", background: "rgba(15,23,42,0.5)", color: "inherit", fontSize: "0.85rem" }}
+              />
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end" }}>
+              <button onClick={handleFindPrev} className="ribbon-btn" title="Vorheriges" style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem" }}>◀</button>
+              <button onClick={handleFindNext} className="ribbon-btn" title="Nächstes" style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem" }}>▶</button>
+              <button onClick={handleReplace} className="ribbon-btn" title="Ersetzen" style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem" }}>Ersetzen</button>
+              <button onClick={handleReplaceAll} className="ribbon-btn" title="Alle ersetzen" style={{ fontSize: "0.8rem", padding: "0.3rem 0.6rem" }}>Alle</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Conditional Formatting Dialog */}
+      {condFormatOpen && (
+        <div style={{
+          position: "fixed", top: "80px", right: "380px", zIndex: 2000,
+          background: "var(--glass-bg)", backdropFilter: "blur(20px)",
+          border: "1px solid var(--glass-border)", borderRadius: "12px",
+          padding: "1rem", minWidth: "300px", boxShadow: "0 25px 50px -12px rgba(0,0,0,0.5)"
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem" }}>
+            <span style={{ fontWeight: 600, fontSize: "0.9rem" }}>🎨 Bedingte Formatierung</span>
+            <button onClick={() => setCondFormatOpen(false)} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: "1.2rem" }}>✕</button>
+          </div>
+          <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
+            <div>
+              <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "0.25rem" }}>Regel-Typ</label>
+              <select
+                value={condFormatType}
+                onChange={(e) => setCondFormatType(e.target.value as ConditionalRule["type"])}
+                style={{ width: "100%", padding: "0.5rem", borderRadius: "6px", border: "1px solid var(--glass-border)", background: "rgba(15,23,42,0.8)", color: "inherit", fontSize: "0.85rem" }}
+              >
+                <option value="greaterThan">Größer als</option>
+                <option value="lessThan">Kleiner als</option>
+                <option value="equals">Gleich</option>
+                <option value="between">Zwischen</option>
+                <option value="text">Text enthält</option>
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "0.25rem" }}>Wert 1</label>
+                <input
+                  type="text"
+                  value={condFormatValue1}
+                  onChange={(e) => setCondFormatValue1(e.target.value)}
+                  placeholder="z.B. 100"
+                  style={{ width: "100%", padding: "0.5rem", borderRadius: "6px", border: "1px solid var(--glass-border)", background: "rgba(15,23,42,0.5)", color: "inherit", fontSize: "0.85rem", boxSizing: "border-box" }}
+                />
+              </div>
+              {condFormatType === "between" && (
+                <div style={{ flex: 1 }}>
+                  <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "0.25rem" }}>Wert 2</label>
+                  <input
+                    type="text"
+                    value={condFormatValue2}
+                    onChange={(e) => setCondFormatValue2(e.target.value)}
+                    placeholder="z.B. 200"
+                    style={{ width: "100%", padding: "0.5rem", borderRadius: "6px", border: "1px solid var(--glass-border)", background: "rgba(15,23,42,0.5)", color: "inherit", fontSize: "0.85rem", boxSizing: "border-box" }}
+                  />
+                </div>
+              )}
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "0.25rem" }}>Textfarbe</label>
+                <input
+                  type="color"
+                  value={condFormatColor}
+                  onChange={(e) => setCondFormatColor(e.target.value)}
+                  style={{ width: "100%", height: "32px", border: "none", borderRadius: "6px", cursor: "pointer" }}
+                />
+              </div>
+              <div style={{ flex: 1 }}>
+                <label style={{ fontSize: "0.75rem", color: "#94a3b8", display: "block", marginBottom: "0.25rem" }}>Hintergrund</label>
+                <input
+                  type="color"
+                  value={condFormatBgColor}
+                  onChange={(e) => setCondFormatBgColor(e.target.value)}
+                  style={{ width: "100%", height: "32px", border: "none", borderRadius: "6px", cursor: "pointer" }}
+                />
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: "0.5rem", justifyContent: "flex-end", marginTop: "0.5rem" }}>
+              <button onClick={() => setCondFormatOpen(false)} className="ribbon-btn" style={{ fontSize: "0.8rem", padding: "0.4rem 0.8rem" }}>Abbrechen</button>
+              <button onClick={addConditionalRule} className="ribbon-btn" style={{ fontSize: "0.8rem", padding: "0.4rem 0.8rem", background: "#3b82f6" }}>Hinzufügen</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Eliot AI Chat Integration */}
       <EliotChat
         contextData={getGridCSV()}
@@ -2590,9 +3710,8 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
           <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "10pt" }}>
             <thead>
               <tr>
-                <th style={{ border: "1px solid #ccc", padding: "8px", background: "#f0f0f0" }}>Row</th>
                 {Array.from({ length: Math.min(cols, 26) }).map((_, c) => (
-                  <th key={c} style={{ border: "1px solid #ccc", padding: "8px", background: "#f0f0f0" }}>
+                  <th key={c} style={{ padding: "8px", fontWeight: "bold", borderBottom: "2px solid #333", textAlign: "left" }}>
                     {String.fromCharCode(65 + c)}
                   </th>
                 ))}
@@ -2604,14 +3723,27 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                 if (!row.some(c => c !== "")) return null;
                 return (
                   <tr key={r}>
-                    <td style={{ border: "1px solid #ccc", padding: "8px", background: "#f9f9f9", fontWeight: "bold" }}>
-                      {r + 1}
-                    </td>
-                    {Array.from({ length: Math.min(cols, 26) }).map((_, c) => (
-                      <td key={c} style={{ border: "1px solid #ccc", padding: "8px", textAlign: cellStyles[`${r}-${c}`]?.align || "left", fontWeight: cellStyles[`${r}-${c}`]?.bold ? "bold" : "normal" }}>
-                        {row[c]}
-                      </td>
-                    ))}
+                    {Array.from({ length: Math.min(cols, 26) }).map((_, c) => {
+                      const style = cellStyles[`${r}-${c}`] || {};
+                      const hasBorder = style.borders?.top || style.borders?.right || style.borders?.bottom || style.borders?.left;
+                      return (
+                        <td key={c} style={{
+                          padding: "6px 8px",
+                          textAlign: style.align || "left",
+                          fontWeight: style.bold ? "bold" : "normal",
+                          fontStyle: style.italic ? "italic" : "normal",
+                          textDecoration: style.underline ? "underline" : "none",
+                          backgroundColor: style.bgColor || "transparent",
+                          color: style.color || "black",
+                          borderTop: style.borders?.top ? "1px solid #333" : "none",
+                          borderRight: style.borders?.right ? "1px solid #333" : "none",
+                          borderBottom: style.borders?.bottom ? "1px solid #333" : (hasBorder ? "none" : "1px solid #e5e7eb"),
+                          borderLeft: style.borders?.left ? "1px solid #333" : "none",
+                        }}>
+                          {computedData[r]?.[c] ?? row[c]}
+                        </td>
+                      );
+                    })}
                   </tr>
                 );
               })}
@@ -2637,27 +3769,42 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
             <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "8pt" }}>
               <thead>
                 <tr>
-                  <th style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>#</th>
                   {Array.from({ length: Math.min(cols, 10) }).map((_, c) => (
-                    <th key={c} style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>
+                    <th key={c} style={{ padding: "4px", fontWeight: "bold", borderBottom: "2px solid #333", textAlign: "left" }}>
                       {String.fromCharCode(65 + c)}
                     </th>
                   ))}
-                  {cols > 10 && <th style={{ border: "1px solid #ccc", padding: "4px", background: "#f1f5f9" }}>...</th>}
+                  {cols > 10 && <th style={{ padding: "4px", fontWeight: "bold", borderBottom: "2px solid #333" }}>...</th>}
                 </tr>
               </thead>
               <tbody>
-                {data.filter(row => row.some(cell => cell !== "")).slice(0, 50).map((row, r) => (
-                  <tr key={r}>
-                    <td style={{ border: "1px solid #ccc", padding: "4px", background: "#f8fafc", fontWeight: 'bold' }}>{r + 1}</td>
-                    {Array.from({ length: Math.min(cols, 10) }).map((_, c) => (
-                      <td key={c} style={{ border: "1px solid #ccc", padding: "4px" }}>
-                        {row[c]}
-                      </td>
-                    ))}
-                    {cols > 10 && <td style={{ border: "1px solid #ccc", padding: "4px" }}>...</td>}
-                  </tr>
-                ))}
+                {data.filter(row => row.some(cell => cell !== "")).slice(0, 50).map((row, rIdx) => {
+                  const actualR = data.indexOf(row);
+                  return (
+                    <tr key={rIdx}>
+                      {Array.from({ length: Math.min(cols, 10) }).map((_, c) => {
+                        const style = cellStyles[`${actualR}-${c}`] || {};
+                        return (
+                          <td key={c} style={{
+                            padding: "4px",
+                            textAlign: style.align || "left",
+                            fontWeight: style.bold ? "bold" : "normal",
+                            fontStyle: style.italic ? "italic" : "normal",
+                            backgroundColor: style.bgColor || "transparent",
+                            color: style.color || "black",
+                            borderTop: style.borders?.top ? "1px solid #333" : "none",
+                            borderRight: style.borders?.right ? "1px solid #333" : "none",
+                            borderBottom: style.borders?.bottom ? "1px solid #333" : "none",
+                            borderLeft: style.borders?.left ? "1px solid #333" : "none",
+                          }}>
+                            {computedData[actualR]?.[c] ?? row[c]}
+                          </td>
+                        );
+                      })}
+                      {cols > 10 && <td style={{ padding: "4px", color: "#999" }}>...</td>}
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
             {(data.filter(row => row.some(c => c !== "")).length > 50) && (

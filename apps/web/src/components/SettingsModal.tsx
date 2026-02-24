@@ -216,6 +216,27 @@ export default function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                         </div>
                     </div>
 
+                    {/* Section: Verbindung */}
+                    <div className="settings-section">
+                        <h3>✍️ Vibe Writing (Ghost-Text)</h3>
+                        <p className="settings-description">
+                            Wenn aktiviert, schlägt die KI beim Tippen automatisch Textergänzungen vor (grau dargestellt). Mit Tab übernehmen.
+                        </p>
+                        <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
+                            <label style={{ display: "flex", alignItems: "center", gap: "0.5rem", cursor: "pointer" }}>
+                                <input
+                                    type="checkbox"
+                                    checked={settings.vibeWriting}
+                                    onChange={(e) => updateSettings({ vibeWriting: e.target.checked })}
+                                    style={{ width: "18px", height: "18px", cursor: "pointer", accentColor: "var(--primary-color)" }}
+                                />
+                                <span style={{ color: "#e2e8f0", fontSize: "0.9rem" }}>
+                                    {settings.vibeWriting ? "Aktiviert" : "Deaktiviert"}
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+
                     {/* Connection Test */}
                     <div className="settings-section">
                         <h3>🔌 Verbindung</h3>

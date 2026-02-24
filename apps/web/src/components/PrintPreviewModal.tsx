@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { X, Printer, Settings, LayoutTemplate } from 'lucide-react';
+import { X, Printer, Settings, LayoutTemplate, FileDown } from 'lucide-react';
 
 interface PrintPreviewModalProps {
     isOpen: boolean;
     onClose: () => void;
     onPrint: () => void;
+    onExportPdf?: () => void;
     previewContent: React.ReactNode;
     defaultOrientation?: 'portrait' | 'landscape';
 }
@@ -17,6 +18,7 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
     isOpen,
     onClose,
     onPrint,
+    onExportPdf,
     previewContent,
     defaultOrientation = 'portrait'
 }) => {
@@ -70,6 +72,10 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
             .print-preview-content .ProseMirror blockquote {
                 border-left-color: #000 !important;
                 color: #444 !important;
+            }
+            /* Hide ghost text in print preview */
+            .print-preview-content .ghost-text {
+                display: none !important;
             }
         `;
 
@@ -261,8 +267,34 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                         {/* Action Area */}
                         <div style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
                             <p style={{ fontSize: "0.8rem", color: "#64748b", margin: 0, lineHeight: 1.4 }}>
-                                TIPP: Im nächsten nativen Dialog können Sie als Ziel "Als PDF speichern" auswählen.
+                                TIPP: Im nativen Druckdialog können Sie "Als PDF speichern" auswählen, oder nutzen Sie den PDF-Export-Button.
                             </p>
+                            <button
+                                onClick={() => {
+                                    // PDF Export: trigger browser print with "Save as PDF" hint
+                                    if (onExportPdf) {
+                                        onExportPdf();
+                                    } else {
+                                        onPrint();
+                                    }
+                                }}
+                                style={{
+                                    background: "linear-gradient(135deg, #10b981, #059669)",
+                                    color: "white",
+                                    border: "none",
+                                    padding: "0.75rem",
+                                    borderRadius: "8px",
+                                    fontWeight: "600",
+                                    display: "flex",
+                                    justifyContent: "center",
+                                    alignItems: "center",
+                                    gap: "0.5rem",
+                                    cursor: "pointer",
+                                    boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)"
+                                }}
+                            >
+                                <FileDown size={18} /> PDF exportieren
+                            </button>
                             <button
                                 onClick={() => {
                                     onPrint();
@@ -282,7 +314,7 @@ export const PrintPreviewModal: React.FC<PrintPreviewModalProps> = ({
                                     boxShadow: "0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06)"
                                 }}
                             >
-                                <Printer size={18} /> Drucken / PDF speichern
+                                <Printer size={18} /> Drucken
                             </button>
                         </div>
                     </div>

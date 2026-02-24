@@ -9,6 +9,12 @@
   --text-muted: #94a3b8;
   --paper-bg: #ffffff;
   --paper-text: #0f172a;
+  --grid-border: rgba(255, 255, 255, 0.1);
+  --grid-header-bg: rgba(30, 41, 59, 0.8);
+  --grid-header-text: #94a3b8;
+  --grid-row-header-bg: #0f172a;
+  --grid-row-header-border: #1e293b;
+  --grid-cell-text: #f8fafc;
 }
 
 body.light-mode {
@@ -18,6 +24,12 @@ body.light-mode {
   --glass-border: rgba(0, 0, 0, 0.1);
   --text-main: #0f172a;
   --text-muted: #475569;
+  --grid-border: rgba(0, 0, 0, 0.15);
+  --grid-header-bg: #e2e8f0;
+  --grid-header-text: #334155;
+  --grid-row-header-bg: #f1f5f9;
+  --grid-row-header-border: #cbd5e1;
+  --grid-cell-text: #0f172a;
 }
 
 body {
@@ -388,24 +400,28 @@ body {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  background: rgba(15, 23, 42, 0.4);
+  background: rgba(15, 23, 42, 0.6);
   backdrop-filter: blur(10px);
   border: 1px solid var(--glass-border);
   padding: 0.4rem 0.8rem;
   border-radius: 8px;
   margin-bottom: 0.75rem;
   font-family: 'Inter', sans-serif;
+  min-height: 36px;
 }
 
 .cell-address {
-  min-width: 60px;
+  min-width: 70px;
+  max-width: 120px;
   font-weight: 600;
   color: var(--primary-color);
   text-align: center;
-  background: rgba(99, 102, 241, 0.1);
-  padding: 0.2rem 0.5rem;
+  background: rgba(99, 102, 241, 0.15);
+  padding: 0.3rem 0.6rem;
   border-radius: 4px;
-  border: 1px solid rgba(99, 102, 241, 0.2);
+  border: 1px solid rgba(99, 102, 241, 0.3);
+  font-size: 0.85rem;
+  font-family: 'Consolas', 'Monaco', monospace;
 }
 
 .formula-icon {
@@ -416,12 +432,20 @@ body {
 
 .formula-input {
   flex: 1;
-  background: transparent;
-  border: none;
+  background: rgba(15, 23, 42, 0.4);
+  border: 1px solid var(--glass-border);
+  border-radius: 4px;
   color: #f8fafc;
   font-size: 0.9rem;
+  font-family: 'Consolas', 'Monaco', monospace;
   outline: none;
-  padding: 0.2rem 0.4rem;
+  padding: 0.35rem 0.6rem;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.formula-input:focus {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
 }
 
 .formula-input::placeholder {
@@ -1091,6 +1115,11 @@ body {
   body {
     -webkit-print-color-adjust: exact;
     print-color-adjust: exact;
+  }
+
+  /* Hide ghost text suggestions in print */
+  .ghost-text {
+    display: none !important;
   }
 }
 /* -- Status Bar ---------------------------------------------------- */

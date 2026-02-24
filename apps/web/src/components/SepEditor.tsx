@@ -458,6 +458,7 @@ export default function SepEditor({ docId }: { docId?: string | null }) {
             FontFamily,
             FontSize,
             GhostText.configure({
+                enabled: aiSettings.vibeWriting,
                 getSuggestion: async (text: string) => {
                     try {
                         return await aiSvc.completeText(aiSettings, text);
@@ -519,6 +520,15 @@ export default function SepEditor({ docId }: { docId?: string | null }) {
         editor.on('update', updateHandler);
         return () => { editor.off('update', updateHandler); };
     }, [editor, currentDocId, docName]);
+
+    // Update GhostText enabled state when vibeWriting setting changes
+    useEffect(() => {
+        if (!editor) return;
+        const ghostTextExt = editor.extensionManager.extensions.find(e => e.name === 'ghostText');
+        if (ghostTextExt) {
+            ghostTextExt.options.enabled = aiSettings.vibeWriting;
+        }
+    }, [editor, aiSettings.vibeWriting]);
 
     const handlePrintOuter = useReactToPrint({
         contentRef: editorRef,
