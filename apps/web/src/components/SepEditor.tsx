@@ -27,6 +27,7 @@ import {
     Download,
     Upload,
     Image as ImageIcon,
+    Pencil,
 } from "lucide-react";
 import { useReactToPrint } from "react-to-print";
 import mammoth from "mammoth";
@@ -137,7 +138,7 @@ const Figure = Node.create({
 });
 
 const MenuBar = ({ editor, onOpenImageModal }: { editor: Editor | null; onOpenImageModal: () => void }) => {
-    const { settings: aiSettings } = useAISettings();
+    const { settings: aiSettings, updateSettings } = useAISettings();
     if (!editor) {
         return null;
     }
@@ -407,6 +408,30 @@ const MenuBar = ({ editor, onOpenImageModal }: { editor: Editor | null; onOpenIm
                 title="Bild einfügen"
             >
                 <ImageIcon size={18} />
+            </button>
+
+            <div
+                style={{
+                    width: "1px",
+                    background: "rgba(255,255,255,0.1)",
+                    margin: "0 4px",
+                }}
+            />
+
+            <button
+                onClick={() => updateSettings({ vibeWriting: !aiSettings.vibeWriting })}
+                className={`toolbar-btn ${aiSettings.vibeWriting ? "is-active" : ""}`}
+                title={aiSettings.vibeWriting ? "Write Vibing deaktivieren" : "Write Vibing aktivieren"}
+                style={{
+                    position: "relative",
+                    border: aiSettings.vibeWriting ? "1px solid rgba(56, 189, 248, 0.5)" : undefined,
+                    background: aiSettings.vibeWriting ? "rgba(56, 189, 248, 0.15)" : undefined,
+                }}
+            >
+                <Pencil size={18} color={aiSettings.vibeWriting ? "#38bdf8" : undefined} />
+                <span style={{ fontSize: "0.6rem", position: "absolute", bottom: "-2px", right: "-2px", color: aiSettings.vibeWriting ? "#38bdf8" : "#64748b" }}>
+                    {aiSettings.vibeWriting ? "ON" : "OFF"}
+                </span>
             </button>
         </div>
     );

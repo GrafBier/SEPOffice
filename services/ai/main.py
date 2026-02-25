@@ -7,10 +7,12 @@ multiprocessing.freeze_support()
 print("AI Service: Script started.")
 import sys
 import os
+import re
 import json
-import threading
 import uvicorn
-from typing import Optional
+import asyncio
+from contextlib import asynccontextmanager
+from typing import Any, Optional, cast
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -23,8 +25,61 @@ print("AI Service: Preparing fast startup...")
 
 print(f"AI Service: Current working directory: {os.getcwd()}")
 
-app = FastAPI(title="SEPOffice AI Service")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """FastAPI lifespan: kick off background model loading on startup."""
+    asyncio.create_task(background_model_load())  # type: ignore[name-defined]
+    yield
+
+app = FastAPI(title="SEPOffice AI Service", lifespan=lifespan)
 print("AI Service: FastAPI app initialized.")
+
+# ---------------------------------------------------------------------------
+# Grammar post-processing filter for small local models (e.g. Qwen 0.5B)
+# ---------------------------------------------------------------------------
+
+def grammar_filter(text: str) -> str:
+    """Clean up common grammar / formatting issues that small LLMs produce.
+
+    This is intentionally kept lightweight (no external NLP library) so it
+    works offline and adds near-zero latency.
+    """
+    if not text:
+        return text
+
+    t = text
+
+    # 1. Remove excessive whitespace / blank lines
+    t = re.sub(r'\n{3,}', '\n\n', t)
+    t = re.sub(r'[ \t]{2,}', ' ', t)
+
+    # 2. Fix missing space after punctuation
+    t = re.sub(r'([.!?,:;])([A-ZÄÖÜ])', r'\1 \2', t)
+
+    # 3. Fix double punctuation
+    t = re.sub(r'([.!?])\1+', r'\1', t)
+
+    # 4. Capitalise the first letter of each sentence
+    def _cap_sentence(match: re.Match[str]) -> str:
+        return match.group(1) + match.group(2).upper()
+    t = re.sub(r'([.!?]\s+)([a-zäöü])', _cap_sentence, t)
+    if t and t[0].isalpha():
+        t = t[0].upper() + t[1:]
+
+    # 5. Fix common German contractions / spacing issues
+    t = re.sub(r'\bich\s+bin\b', 'ich bin', t)  # no-op guard
+    # Collapse repeated words ("das das" -> "das")
+    t = re.sub(r'\b(\w+)\s+\1\b', r'\1', t, flags=re.IGNORECASE)
+
+    # 6. Trim trailing whitespace on each line
+    t = '\n'.join(line.rstrip() for line in t.split('\n'))
+
+    # 7. Ensure text ends with proper punctuation when it looks like prose
+    stripped = t.rstrip()
+    if stripped and stripped[-1].isalpha() and len(stripped) > 20:
+        t = stripped + '.'
+
+    return t.strip()
 
 app.add_middleware(
     CORSMiddleware,
@@ -42,7 +97,7 @@ class CompletionRequest(BaseModel):
     max_new_tokens: Optional[int] = 200
 
 class ChatRequest(BaseModel):
-    messages: list[dict]
+    messages: list[dict[str, Any]]
     max_new_tokens: Optional[int] = 1024
     temperature: Optional[float] = 0.7
 
@@ -64,14 +119,13 @@ class GridActionRequest(BaseModel):
     instruction: str
     gridData: list[list[str]]
     computedData: list[list[str]]
-    selection: dict
+    selection: dict[str, Any]
 
 # Global AI generator
 generator = None
 last_error = None
 model_loading = False
 loading_progress = 0
-import asyncio
 
 async def background_model_load():
     global generator, last_error, model_loading, loading_progress
@@ -79,7 +133,6 @@ async def background_model_load():
     loading_progress = 0
     print("AI Service: Starting background model loading...")
     
-    import sys
     # Base directory for finding the model
     if getattr(sys, 'frozen', False):
         base_dir = os.path.dirname(sys.executable)
@@ -132,14 +185,8 @@ async def background_model_load():
     finally:
         model_loading = False
 
-@app.on_event("startup")
-async def startup_event():
-    import asyncio
-    # Schedule the model loading as a background task
-    asyncio.create_task(background_model_load())
-
 @app.get("/health")
-def health_check():
+def health_check() -> dict[str, Any]:
     status = "ok"
     if model_loading:
         status = "loading"
@@ -162,10 +209,10 @@ async def chat_completion(req: ChatRequest):
     
     try:
         # Build a single prompt from the messages
-        prompt_parts = []
+        prompt_parts: list[str] = []
         for msg in req.messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
+            role: str = str(msg.get("role", "user"))
+            content: str = str(msg.get("content", ""))
             if role == "system":
                 prompt_parts.append(f"System: {content}")
             elif role == "user":
@@ -187,6 +234,9 @@ async def chat_completion(req: ChatRequest):
         else:
             response_text = generated_text.strip()
         
+        # Apply grammar post-processing for better output quality
+        response_text = grammar_filter(response_text)
+        
         # Return in OpenAI-compatible format
         return {
             "choices": [{
@@ -201,9 +251,9 @@ async def chat_completion(req: ChatRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/correct")
-def correct_text(req: CorrectionRequest):
+def correct_text(req: CorrectionRequest) -> dict[str, Any]:
     # Dummy correction for MVP
-    return {"corrected": req.text, "suggestions": []}
+    return {"corrected": req.text, "suggestions": cast(list[str], [])}
 
 @app.post("/api/complete")
 def complete_text(req: CompletionRequest):
@@ -225,6 +275,9 @@ def complete_text(req: CompletionRequest):
             completion = generated_text[len(context):]
         else:
             completion = generated_text
+        
+        # Apply grammar post-processing
+        completion = grammar_filter(completion)
             
         return {"completion": completion.strip()}
     except Exception as e:
@@ -274,9 +327,9 @@ async def explain_error(req: ErrorExplainRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/smart_fill")
-async def smart_fill(req: SmartFillRequest):
+async def smart_fill(req: SmartFillRequest) -> dict[str, Any]:
     if generator is None:
-        return {"filled": []}
+        return {"filled": cast(list[str], [])}
         
     items_str = ", ".join([f"[{i}]" if i else "[?]" for i in req.items])
     prompt = f"Du bist eine 'Smart Fill' KI in einer Tabelle. Erkenne das Muster und fülle die fehlenden Werte [?] logisch aus. Antworte NUR mit den fehlenden Werten, zeilenweise getrennt.\nMuster: {items_str}\nFehlende Werte:"
@@ -311,15 +364,16 @@ async def optimize_text(req: OptimizeRequest):
             optimized = generated_text[len(prompt):].strip()
         else:
             optimized = generated_text.replace(prompt, "").strip()
+        
+        # Apply grammar post-processing for polished output
+        optimized = grammar_filter(optimized)
             
         return {"optimized": optimized}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-import json
-
 @app.post("/api/grid_action")
-async def grid_action(req: GridActionRequest):
+async def grid_action(req: GridActionRequest) -> dict[str, Any]:
     if generator is None:
         return {"new_grid_data": req.gridData}
         
@@ -361,9 +415,9 @@ Ergebnis JSON:"""
             orig_rows = len(req.gridData)
             orig_cols = len(req.gridData[0]) if orig_rows > 0 else 26
             
-            padded_data = []
+            padded_data: list[list[str]] = []
             for r in range(orig_rows):
-                new_row = []
+                new_row: list[str] = []
                 for c in range(orig_cols):
                     if r < len(new_data) and c < len(new_data[r]):
                         new_row.append(str(new_data[r][c]))

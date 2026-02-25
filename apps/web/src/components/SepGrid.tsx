@@ -167,6 +167,17 @@ const scanWorksheetForRisks = (ws?: XLSX.WorkSheet): ScanResult => {
     kept it local and explicit (no external library) for maintainability.
 */
 
+/** Convert a 0-based column index to an Excel-style letter (0→A, 25→Z, 26→AA, …). */
+const colToLetter = (index: number): string => {
+  let result = "";
+  let n = index;
+  while (n >= 0) {
+    result = String.fromCharCode(65 + (n % 26)) + result;
+    n = Math.floor(n / 26) - 1;
+  }
+  return result;
+};
+
 const sanitizeImportedValue = (value: unknown): string => {
   if (value === undefined || value === null) return "";
   if (typeof value === "number") return value.toString();
@@ -820,9 +831,9 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
         setFillEnd({ r, c });
         fillEndRef.current = { r, c };
       } else if (formulaDragging && formulaDragStart && isEditingFormula && selectionRef.current.start) {
-        const startCol = String.fromCharCode(65 + formulaDragStart.c);
+        const startCol = colToLetter(formulaDragStart.c);
         const startRow = formulaDragStart.r + 1;
-        const endCol = String.fromCharCode(65 + c);
+        const endCol = colToLetter(c);
         const endRow = r + 1;
         const baseFormula = formulaInput.replace(/[A-Z]+\d+(:[A-Z]+\d+)?$/, "");
         const rangeStr = (formulaDragStart.r === r && formulaDragStart.c === c)
@@ -1307,8 +1318,8 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
     const minC = Math.min(selection.start.c, selection.end.c);
     const maxC = Math.max(selection.start.c, selection.end.c);
     
-    const startCol = String.fromCharCode(65 + minC);
-    const endCol = String.fromCharCode(65 + maxC);
+    const startCol = colToLetter(minC);
+    const endCol = colToLetter(maxC);
     const rangeStr = `${startCol}${minR + 1}:${endCol}${maxR + 1}`;
     
     const newRule: ConditionalRule = {
@@ -2102,8 +2113,8 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
     // Add column headers if there is data
     if (csv) {
       let headers = "Row,";
-      for (let c = 0; c < Math.min(cols, 26); c++) {
-        headers += String.fromCharCode(65 + c) + ",";
+      for (let c = 0; c < cols; c++) {
+        headers += colToLetter(c) + ",";
       }
       return headers.slice(0, -1) + "\n" + csv;
     }
@@ -2581,7 +2592,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
               const { r, c } = selection.start;
               let sumRange = "";
               if (r > 0) {
-                const colLetter = String.fromCharCode(65 + c);
+                const colLetter = colToLetter(c);
                 sumRange = `=SUM(${colLetter}1:${colLetter}${r})`;
               }
               handleCellChange(r, c, sumRange);
@@ -2864,8 +2875,8 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
           {selection.start && selection.end
              // If start != end, show range A1:B2, else just A1
             ? (selection.start.r !== selection.end.r || selection.start.c !== selection.end.c)
-                ? `${String.fromCharCode(65 + Math.min(selection.start.c, selection.end.c))}${Math.min(selection.start.r, selection.end.r) + 1}:${String.fromCharCode(65 + Math.max(selection.start.c, selection.end.c))}${Math.max(selection.start.r, selection.end.r) + 1}`
-                : `${String.fromCharCode(65 + selection.start.c)}${selection.start.r + 1}`
+                ? `${colToLetter(Math.min(selection.start.c, selection.end.c))}${Math.min(selection.start.r, selection.end.r) + 1}:${colToLetter(Math.max(selection.start.c, selection.end.c))}${Math.max(selection.start.r, selection.end.r) + 1}`
+                : `${colToLetter(selection.start.c)}${selection.start.r + 1}`
             : ""}
         </div>
         {/* fx Symbol wie in Excel */}
@@ -2895,7 +2906,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
               setShowFormulaSuggestions(false);
 
               // Helper to generate the A1 notation
-              const getCellStr = (r: number, c: number) => `${String.fromCharCode(65 + c)}${r + 1}`;
+              const getCellStr = (r: number, c: number) => `${colToLetter(c)}${r + 1}`;
 
               // If multiple cells are selected, automatically apply the formula to the active cell!
               if (selection.start && selection.end &&
@@ -2922,7 +2933,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                 top: "100%",
                 left: 0,
                 marginTop: "0.5rem",
-                zIndex: 100
+                zIndex: 9999
               }}>
                 <button onClick={() => applyQuickFormula("=SUM(")}>SUM() - Summe</button>
                 <button onClick={() => applyQuickFormula("=AVERAGE(")}>AVERAGE() - Mittelwert</button>
@@ -3160,7 +3171,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                   userSelect: "none"
                 }}
               >
-                {i < 26 ? String.fromCharCode(65 + i) : String.fromCharCode(64 + Math.floor(i / 26)) + String.fromCharCode(65 + (i % 26))}
+                {colToLetter(i)}
                 <div
                   className="col-resizer"
                   onMouseDown={(e) => {
@@ -3355,7 +3366,7 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                         if (shouldInsertRef) {
                           setFormulaDragStart({ r: rIndex, c: cIndex });
                           setFormulaDragging(true);
-                          const colLetter = String.fromCharCode(65 + cIndex);
+                          const colLetter = colToLetter(cIndex);
                           const rowNum = rIndex + 1;
                           
                           // If we're on a different sheet and the formula doesn't already have the sheet prefix
@@ -3409,9 +3420,9 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
                       }}
                       onMouseEnter={() => {
                         if (formulaDragging && formulaDragStart && isEditingFormula && selectionRef.current.start) {
-                          const startCol = String.fromCharCode(65 + formulaDragStart.c);
+                          const startCol = colToLetter(formulaDragStart.c);
                           const startRow = formulaDragStart.r + 1;
-                          const endCol = String.fromCharCode(65 + cIndex);
+                          const endCol = colToLetter(cIndex);
                           const endRow = rIndex + 1;
                           const baseFormula = formulaInput.replace(/[A-Z]+\d+(:[A-Z]+\d+)?$/, "");
                           const rangeStr = (formulaDragStart.r === rIndex && formulaDragStart.c === cIndex)
@@ -3708,15 +3719,6 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
         <div ref={printRef} style={{ padding: "2cm", color: "black", background: "white", fontFamily: "sans-serif" }}>
           <h1 style={{ textAlign: "center", marginBottom: "2rem" }}>{currentSheet.name}</h1>
           <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "10pt" }}>
-            <thead>
-              <tr>
-                {Array.from({ length: Math.min(cols, 26) }).map((_, c) => (
-                  <th key={c} style={{ padding: "8px", fontWeight: "bold", borderBottom: "2px solid #333", textAlign: "left" }}>
-                    {String.fromCharCode(65 + c)}
-                  </th>
-                ))}
-              </tr>
-            </thead>
             <tbody>
               {data.map((row, r) => {
                 // Only print rows that actually have data to save paper
@@ -3767,16 +3769,6 @@ export default function SepGrid({ docId }: { docId?: string | null }) {
           <div style={{ padding: "1rem", color: "black", background: "white", fontFamily: "sans-serif", overflowY: 'auto', maxHeight: '600px' }}>
             <h2 style={{ textAlign: "center", marginBottom: "1rem" }}>{currentSheet.name}</h2>
             <table style={{ borderCollapse: "collapse", width: "100%", fontSize: "8pt" }}>
-              <thead>
-                <tr>
-                  {Array.from({ length: Math.min(cols, 10) }).map((_, c) => (
-                    <th key={c} style={{ padding: "4px", fontWeight: "bold", borderBottom: "2px solid #333", textAlign: "left" }}>
-                      {String.fromCharCode(65 + c)}
-                    </th>
-                  ))}
-                  {cols > 10 && <th style={{ padding: "4px", fontWeight: "bold", borderBottom: "2px solid #333" }}>...</th>}
-                </tr>
-              </thead>
               <tbody>
                 {data.filter(row => row.some(cell => cell !== "")).slice(0, 50).map((row, rIdx) => {
                   const actualR = data.indexOf(row);

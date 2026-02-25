@@ -408,6 +408,8 @@ body {
   margin-bottom: 0.75rem;
   font-family: 'Inter', sans-serif;
   min-height: 36px;
+  position: relative;
+  z-index: 200;
 }
 
 .cell-address {
